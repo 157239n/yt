@@ -2,6 +2,9 @@ from k1lib.imports import *
 import magic
 from urllib.parse import urlparse, parse_qs
 
+yt_dlp = "/home/kelvin/envs/torch/bin/yt-dlp"
+whisper = "/home/kelvin/envs/torch/bin/whisper"
+
 db = sql("dbs/main.db", mode="lite", manage=True)["default"]
 db.query("""CREATE TABLE IF NOT EXISTS videos (
     id          INTEGER primary key autoincrement,
@@ -28,14 +31,14 @@ def index():
             'none' if te is None else ('error' if te else 'yes'),dur,
             'none' if cs is None else ('error' if cs.startswith("error") else cs),ti])\
         | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatStr", "title"], onclickFName=f"{pre}_select", selectable=True, height=400)) | op().interface() | toHtml()
-    return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style>
+    return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
 <div id="main" style="display: flex; flex-direction: column">
     <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
         <h2>Videos</h2>
         <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px" />
         <button id="{pre}_newBtn" class="btn">{k1.Icon.add()}</button>
     </div>
-    <div style="overflow-x: auto; width: fit-content">{ui1}</div>
+    <div style="overflow-x: auto; width: 100%">{ui1}</div>
     <div id="{pre}_res"></div></div>
 <script>
     function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}`); }}
@@ -47,7 +50,7 @@ def api_vid_new(js):
     url = js["url"]; vidId = url.split("/watch")[-1].strip("?").split("&")[0]; vidId = parse_qs(urlparse(url).query).get("v", [None])[0]
     if vidId is None: web.toast_error("Can't extract vidId")
     if db["videos"].lookup(vidId=vidId): web.toast_error("Video added before!")
-    db["videos"].insert(url=url, vidId=vidId, title=title, vidErr=None, trans="", transErr=None, createdTime=int(time.time())); return "ok"
+    db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time())); return "ok"
 
 @app.route("/raw/vid/<int:vidId>")
 def raw_vid(vidId):
@@ -74,28 +77,41 @@ def fragment_vid(vidId):
 
 @app.route("/mfragment/vid/<int:vidId>")
 def mfragment_vid(vidId):
-    vid = db["videos"][vidId]; vidTag = ""; transTag = ""; chatTag = ""
+    pre = init._jsDAuto(); vid = db["videos"][vidId]; vidTag = ""; transTag = ""; chatTag = ""
     if vid.transErr == "": transTag = f"""<textarea class="textarea textarea-bordered" style="width: 100%; height: 360px">{vid.trans}</textarea>"""
     if vid.chatStr and not vid.chatStr.startswith("error"): chatTag = f" - <a href='https://ai.aigu.vn/schedules/{vid.chatStr}' target='_blank' style='color: blue'>Summary</a>"
-    return f"""
+    return f"""<style>#{pre}_main {{ flex-direction: row; }} @media (max-width: 800px) {{ #{pre}_main {{ flex-direction: column }} }}</style>
 <h2><a href="{vid.url}" target="_blank">{vid.title}</a>{chatTag}</h2>
-<div style="display: flex; flex-direction: row; column-gap: 8px">
+<div id="{pre}_main" style="display: flex; gap: 12px">
     <div style="flex: 1">{transTag}</div>
-    <div id="vidHolder" style="flex: 1"><button class="btn" onclick="dynamicLoad('#vidHolder', '/fragment/vid/{vid.id}')">Load video</button></div>
-</div>"""
+    <div id="vidHolder" style="flex: 1; display: grid; grid-template-columns: min-content auto; height: min-content; row-gap: 8px; column-gap: 8px; align-items: center">
+        <button class="btn" onclick="vidHolder.style.display = 'block'; vidHolder.style.height = '360px'; dynamicLoad('#vidHolder', '/fragment/vid/{vid.id}')">Load video</button><div></div>
+        <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/vidErr'))"  >Clear vidErr  </button><div id="{pre}_1"></div>
+        <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/transErr'))">Clear transErr</button><div id="{pre}_2"></div>
+        <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/chatStr'))" >Clear chatStr </button><div id="{pre}_3"></div>
+    </div></div>
+<script>{pre}_1.innerHTML = {json.dumps(vid.vidErr)}; {pre}_2.innerHTML = {json.dumps(vid.transErr)}; {pre}_3.innerHTML = {json.dumps(vid.chatStr)};</script>"""
+
+@app.route("/api/vid/<int:vidId>/clear/<resource>")
+def api_vid_clear(vidId, resource):
+    vid = db["videos"][vidId]
+    if resource == "vidErr": vid.vidErr = None
+    if resource == "transErr": vid.transErr = None
+    if resource == "chatStr": vid.chatStr = None
+    return "ok"
 
 @k1.cron(delay=10)
 def titleLoop():
     for vid in db["videos"].select("where title is null"):
-        vid.title = None | cmd('yt-dlp --print "%(title)s" ' + f"https://www.youtube.com/watch?v={vid.vidId}") | deref() | join("\n")
+        vid.title = None | cmd(f'{yt_dlp} --print "%(title)s" https://www.youtube.com/watch?v={vid.vidId}') | deref() | join("\n")
 
 @k1.cron(delay=10)
 def vidLoop(): # auto detects videos that need to be taken care of
     for vid in db["videos"].select("where vidErr is null"):
         print(f"vid: {vid.id}")
-        None | cmd(f'yt-dlp -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}') | ignore()
+        res = None | cmd(f'{yt_dlp} -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}', mode=0) | deref()
         fns = "tmpVids" | ls() | grep("new") | deref()
-        if len(fns) == 0: vid.vidErr = "Tried to download, no new.mp4 or new.webm or others found in tmpVids"; continue
+        if len(fns) == 0: vid.vidErr = "Tried to download, no new.mp4 or new.webm or others found in tmpVids"; print(f"vidLoop error: {res}"); continue
         None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
 
 @k1.cron(delay=10)
@@ -108,9 +124,9 @@ def magicLoop():
 def matroskaLoop(): # detects videos that are of matroska format, and reformat it to webm so browsers can actually play it
     for vid in db["videos"].select("where mime = 'video/x-matroska'"):
         print(f"matroska: {vid.id}")
-        None | cmd(f"ffmpeg -i vids/{vid.vidId} -c:v libvpx -crf 10 -b:v 2M -c:a libvorbis tmpVids/output.webm") | ignore()
+        res = None | cmd(f"ffmpeg -i vids/{vid.vidId} -c:v libvpx -crf 10 -b:v 2M -c:a libvorbis tmpVids/output.webm", mode=0) | deref()
         fns = "tmpVids" | ls() | grep("output.webm") | deref()
-        if len(fns) == 0: vid.mime = "video/x-matroska-error"; return
+        if len(fns) == 0: vid.mime = "video/x-matroska-error"; print(f"matroska error: {res}"); continue
         None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.mime = "video/webm"
 
 # @k1.cron(delay=10)
@@ -128,9 +144,9 @@ def durationLoop():
 def transLoop():
     for vid in db["videos"].select("where vidErr = '' and transErr is null"):
         print(f"transcribe: {vid.id}")
-        None | cmd(f'whisper vids/{vid.vidId} -f vtt --output_dir tmpTrans --model small') | deref()
+        res = None | cmd(f'{whisper} vids/{vid.vidId} -f vtt --output_dir tmpTrans --model small', mode=0) | deref()
         fns = "tmpTrans" | ls() | grep(vid.vidId) | deref()
-        if len(fns) == 0: vid.transErr = "Tried to transcribe, no vidId.vtt found in tmpTrans"; return
+        if len(fns) == 0: vid.transErr = "Tried to transcribe, no vidId.vtt found in tmpTrans"; warnings.warn(f"trans error: {res}"); return
         with open(fns[0]) as f: vid.trans = f.read(); vid.transErr = ""
         None | cmd(f'rm tmpTrans/*') | ignore()
 
