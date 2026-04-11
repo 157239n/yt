@@ -89,27 +89,30 @@ def mfragment_vid(vidId):
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/vidErr'))"  >Clear vidErr  </button><div id="{pre}_1"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/transErr'))">Clear transErr</button><div id="{pre}_2"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/chatStr'))" >Clear chatStr </button><div id="{pre}_3"></div>
+        <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/title'))"   >Clear title   </button><div id="{pre}_4"></div>
     </div></div>
-<script>{pre}_1.innerHTML = {json.dumps(vid.vidErr)}; {pre}_2.innerHTML = {json.dumps(vid.transErr)}; {pre}_3.innerHTML = {json.dumps(vid.chatStr)};</script>"""
+<script>{pre}_1.innerHTML = {json.dumps(vid.vidErr)}; {pre}_2.innerHTML = {json.dumps(vid.transErr)};
+{pre}_3.innerHTML = {json.dumps(vid.chatStr)}; {pre}_4.innerHTML = {json.dumps(vid.title)};</script>"""
 
 @app.route("/api/vid/<int:vidId>/clear/<resource>")
 def api_vid_clear(vidId, resource):
     vid = db["videos"][vidId]
-    if resource == "vidErr": vid.vidErr = None
+    if resource == "vidErr":   vid.vidErr = None
     if resource == "transErr": vid.transErr = None
-    if resource == "chatStr": vid.chatStr = None
+    if resource == "chatStr":  vid.chatStr = None
+    if resource == "title":    vid.title = None
     return "ok"
 
 @k1.cron(delay=10)
 def titleLoop():
     for vid in db["videos"].select("where title is null"):
-        vid.title = None | cmd(f'{yt_dlp} --print "%(title)s" https://www.youtube.com/watch?v={vid.vidId}') | deref() | join("\n")
+        vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.youtube.com/watch?v={vid.vidId}') | deref() | join("\n")
 
 @k1.cron(delay=10)
 def vidLoop(): # auto detects videos that need to be taken care of
-    for vid in db["videos"].select("where vidErr is null"):
+    for vid in db["videos"].select("where vidErr is null limit 1"):
         print(f"vid: {vid.id}")
-        res = None | cmd(f'{yt_dlp} -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}', mode=0) | deref()
+        res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}', mode=0) | deref()
         fns = "tmpVids" | ls() | grep("new") | deref()
         if len(fns) == 0: vid.vidErr = "Tried to download, no new.mp4 or new.webm or others found in tmpVids"; print(f"vidLoop error: {res}"); continue
         None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
