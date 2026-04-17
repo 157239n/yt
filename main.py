@@ -17,7 +17,10 @@ db.query("""CREATE TABLE IF NOT EXISTS videos (
     createdTime INTEGER, -- unix time
     mime        TEXT,
     duration    REAL,    -- duration of the video in seconds
-    chatStr     TEXT     -- scheduleId/chatId on ai server summarizing the video
+    chatStr     TEXT,    -- scheduleId/chatId on ai server summarizing the video
+    provider    TEXT,    -- what provider this video belongs to. yt/dailymotion
+    retain      BOOL,    -- if True, retains the video, else deletes it to save space
+    cleaned     BOOL     -- whether this video has been removed to save space?
 );""")
 db.query("CREATE INDEX IF NOT EXISTS videos_vidId ON videos (vidId);")
 
@@ -26,11 +29,11 @@ app = web.Flask(__name__)
 @app.route("/", daisyEnv=True)
 def index():
     pre = init._jsDAuto()
-    ui1 = db.query("select id, vidId, vidErr, transErr, duration, chatStr, title from videos order by id desc") | ~apply(lambda i,vi,ve,te,dur,cs,ti: [i,vi,
+    ui1 = db.query("select id, vidId, vidErr, transErr, duration, chatStr, cleaned, title from videos order by id desc") | ~apply(lambda i,vi,ve,te,dur,cs,cls,ti: [i,vi,
             'none' if ve is None else ('error' if ve else 'yes'),
             'none' if te is None else ('error' if te else 'yes'),dur,
-            'none' if cs is None else ('error' if cs.startswith("error") else cs),ti])\
-        | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatStr", "title"], onclickFName=f"{pre}_select", selectable=True, height=400)) | op().interface() | toHtml()
+            'none' if cs is None else ('error' if cs.startswith("error") else cs),cls,ti])\
+        | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatStr", "cleaned", "title"], onclickFName=f"{pre}_select", selectable=True, height=400)) | op().interface() | toHtml()
     return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
 <div id="main" style="display: flex; flex-direction: column">
     <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
@@ -47,10 +50,15 @@ def index():
 
 @app.route("/api/vid/new", methods=["POST"])
 def api_vid_new(js):
-    url = js["url"]; vidId = url.split("/watch")[-1].strip("?").split("&")[0]; vidId = parse_qs(urlparse(url).query).get("v", [None])[0]
+    url = js["url"]; provider = None
+    if url.startswith("https://www.youtube.com/watch"):
+        provider = "yt"; vidId = url.split("/watch")[-1].strip("?").split("&")[0]; vidId = parse_qs(urlparse(url).query).get("v", [None])[0]
+    elif url.startswith("https://www.dailymotion.com/video"):
+        provider = "dailymotion"; vidId = url.split("/video/")[1].split("/")[0].split("?")[0].split("&")[0].strip()
     if vidId is None: web.toast_error("Can't extract vidId")
-    if db["videos"].lookup(vidId=vidId): web.toast_error("Video added before!")
-    db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time())); return "ok"
+    if provider is None: web.toast_error("Don't know what service (youtube, dailymotion, etc) this url belongs to")
+    if db["videos"].lookup(vidId=vidId, provider=provider): web.toast_error("Video added before!")
+    db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0); return "ok"
 
 @app.route("/raw/vid/<int:vidId>")
 def raw_vid(vidId):
@@ -72,6 +80,7 @@ def api_vids_recents(): return db.query("select vidId, title, duration from vide
 @app.route("/fragment/vid/<int:vidId>")
 def fragment_vid(vidId):
     vid = db["videos"][vidId]
+    if vid.cleaned: return "(video was cleaned, no copies remained)"
     if vid.vidErr == "": return f"""<video controls width="640" height="360"><source src="/raw/vid/{vid.id}" type="{vid.mime}">Your browser does not support the video tag.</video>"""
     return "(no video)"
 
@@ -90,6 +99,7 @@ def mfragment_vid(vidId):
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/transErr'))">Clear transErr</button><div id="{pre}_2"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/chatStr'))" >Clear chatStr </button><div id="{pre}_3"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/title'))"   >Clear title   </button><div id="{pre}_4"></div>
+        <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/retain'))"  >Retain        </button><div>Retain video, dont delete to save space</div>
     </div></div>
 <script>{pre}_1.innerHTML = {json.dumps(vid.vidErr)}; {pre}_2.innerHTML = {json.dumps(vid.transErr)};
 {pre}_3.innerHTML = {json.dumps(vid.chatStr)}; {pre}_4.innerHTML = {json.dumps(vid.title)};</script>"""
@@ -101,18 +111,23 @@ def api_vid_clear(vidId, resource):
     if resource == "transErr": vid.transErr = None
     if resource == "chatStr":  vid.chatStr = None
     if resource == "title":    vid.title = None
+    if resource == "retain":   vid.retain = True
     return "ok"
 
 @k1.cron(delay=10)
 def titleLoop():
     for vid in db["videos"].select("where title is null"):
-        vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.youtube.com/watch?v={vid.vidId}') | deref() | join("\n")
+        if   vid.provider == "yt":          vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.youtube.com/watch?v={vid.vidId}')   | deref() | join("\n")
+        elif vid.provider == "dailymotion": vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.dailymotion.com/video/{vid.vidId}') | deref() | join("\n")
+        else: vid.title = f"Unknown provider {vid.provider}"
 
 @k1.cron(delay=10)
 def vidLoop(): # auto detects videos that need to be taken care of
     for vid in db["videos"].select("where vidErr is null limit 1"):
-        print(f"vid: {vid.id}")
-        res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}', mode=0) | deref()
+        print(f"vid: {vid.id}, provider: {vid.provider}")
+        if   vid.provider == "yt":          res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}',   mode=0) | deref()
+        elif vid.provider == "dailymotion": res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" https://www.dailymotion.com/video/{vid.vidId}', mode=0) | deref()
+        else: vid.vidErr = f"Unknown provider '{vid.provider}'"
         fns = "tmpVids" | ls() | grep("new") | deref()
         if len(fns) == 0: vid.vidErr = "Tried to download, no new.mp4 or new.webm or others found in tmpVids"; print(f"vidLoop error: {res}"); continue
         None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
@@ -158,8 +173,14 @@ def summarizeLoop():
     if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
     for vid in db["videos"].select("where transErr = '' and chatStr is null"):
         print(f"summarize: {vid.id}")
-        res = requests.post("https://ai.aigu.vn/api/schedule/18/manualNewChat", json={"prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it"})
+        res = requests.post("https://ai.aigu.vn/api/schedule/18/manualNewChat", json={"prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small errors, correct it if necessary"})
         vid.chatStr = f"18/{res.text}" if res.ok else f"error: {res.text}"
+
+@k1.cron(delay=10)
+def cleanLoop():
+    now = int(time.time())
+    for vid in db["videos"].select(f"where vidErr = '' and transErr = '' and createdTime < {now - 86400} and retain = 0 and cleaned = 0 limit 1"):
+        None | cmd(f'rm vids/{vid.vidId}') | ignore(); vid.cleaned = 1
 
 sql.lite_flask(app); k1.logErr.flask(app); k1.cron.flask(app)
 
