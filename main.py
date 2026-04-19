@@ -1,6 +1,7 @@
 from k1lib.imports import *
 import magic
 from urllib.parse import urlparse, parse_qs
+from schemaParser import *
 
 yt_dlp = "/home/kelvin/envs/torch/bin/yt-dlp"
 whisper = "/home/kelvin/envs/torch/bin/whisper"
@@ -95,7 +96,7 @@ def api_vid_new(js, guardRes):
         hasAccess = db["access"].lookup(vidId=vid.id, userId=userId)
         if hasAccess: web.toast_error("Video added before!")
         else: db["access"].insert(vidId=vid.id, userId=userId, chatId=None); return "ok"
-    db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
+    vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
     db["access"].insert(vidId=vid.id, userId=userId, chatId=None); return "ok"
 
 @app.route("/raw/vid/<int:vidId>", guard=vidGuard)
@@ -103,8 +104,8 @@ def raw_vid(vidId):
     vid = db["videos"][vidId]
     with open(f"vids/{vid.vidId}", "rb") as f: return f.read()
 
-@app.route("/api/vid/<vidId>/transcript")
-@app.route("/api/vid/<vidId>/transcript/<format>")
+@app.route("/api/vid/<vidId>/transcript", guard=vidGuard)
+@app.route("/api/vid/<vidId>/transcript/<format>", guard=vidGuard)
 def api_vid_transcript(vidId, format="text"):
     vid = db["videos"].lookup(vidId=vidId)
     if vid is None: web.notFound()
@@ -225,6 +226,36 @@ def cleanLoop():
     now = int(time.time())
     for vid in db["videos"].select(f"where vidErr = '' and transErr = '' and createdTime < {now - 86400} and retain = 0 and cleaned = 0 limit 1"):
         None | cmd(f'rm vids/{vid.vidId}') | ignore(); vid.cleaned = 1
+
+ytUrl = f"http://localhost:5008"
+@toolCatchErr
+def ytRecents() -> dict:
+    """Get recently downloaded youtube videos metadata"""
+    yield None; return requests.get(f"{ytUrl}/api/vids/recents").text | aS(json.loads)
+@toolCatchErr
+def ytTranscript(vidId:str, env) -> str:
+    """Get transcript of specific youtube video"""
+    yield {"type": "status", "content": "Fetching transcript"}
+    return api_vid_transcript(vidId)
+
+toolsD = {"ytTranscript": ytTranscript}
+
+@app.route("/ingest", methods=["POST"], guard=tokenGuard)
+def ingest(js):
+    if js["cmd"] == "toolCall":
+        func = js["func"]; env = js["env"]; args = js["args"]
+        if func in toolsD:
+            it = ytTranscript(**{**args, "env": env})
+            try:
+                while True: x = next(it); yield (json.dumps({"type": "yield", "value": x}) | toBase64()) + "\n"
+            except StopIteration as e: yield (json.dumps({"type": "return", "value": e.value}) | toBase64()) + "\n"
+            return ""
+    web.notFound("Don't understand this ingest message")
+
+@app.route("/serverDef")
+def serverDef(): # server definition so that it can be used by main ai server
+    tools = [ytTranscript] | apply(function_to_ollama_tool) | apply(lambda x: {"server": "yt", "schema": x}) | aS(list)
+    res = {"url": "https://yt.aigu.vn", "name": "yt", "descr": "Manages youtube downloads", "tools": tools}; return json.dumps(res)
 
 sql.lite_flask(app); k1.logErr.flask(app); k1.cron.flask(app)
 
