@@ -4,7 +4,6 @@ from urllib.parse import urlparse, parse_qs
 from schemaParser import *
 
 yt_dlp = "/home/kelvin/envs/torch/bin/yt-dlp"
-whisper = "/home/kelvin/envs/torch/bin/whisper"
 
 db = sql("dbs/main.db", mode="lite", manage=True)["default"]
 db.query("""CREATE TABLE IF NOT EXISTS videos (
@@ -202,22 +201,26 @@ def durationLoop():
         print(f"duration: {vid.id}")
         vid.duration = None | cmd(f"ffprobe -v error -show_entries format=duration -of default=nw=1 -i vids/{vid.vidId}") | join("") | op().strip().replace("duration=", "") | aS(float)
 
+from faster_whisper import WhisperModel; model = WhisperModel("small", device="cuda", compute_type="int8_float16")
+def seconds_to_vtt_timestamp(seconds: float) -> str:
+    total_milliseconds = int(round(seconds * 1000)); hours = total_milliseconds // 3_600_000
+    minutes = (total_milliseconds % 3_600_000) // 60_000; secs = (total_milliseconds % 60_000) // 1000
+    milliseconds = total_milliseconds % 1000; return f"{hours:02}:{minutes:02}:{secs:02}.{milliseconds:03}"
+def getVtt(segments): return "WEBVTT\n\n" + (segments | apply(lambda segment: f"{seconds_to_vtt_timestamp(segment.start)} --> {seconds_to_vtt_timestamp(segment.end)}\n{segment.text.strip()}\n\n") | join(""))
+
 @k1.cron(delay=10)
 def transLoop():
     for vid in db["videos"].select("where vidErr = '' and transErr is null"):
         print(f"transcribe: {vid.id}")
-        res = None | cmd(f'{whisper} vids/{vid.vidId} -f vtt --output_dir tmpTrans --model medium', mode=0) | deref()
-        fns = "tmpTrans" | ls() | grep(vid.vidId) | deref()
-        if len(fns) == 0: vid.transErr = "Tried to transcribe, no vidId.vtt found in tmpTrans"; warnings.warn(f"trans error: {res}"); return
-        with open(fns[0]) as f: vid.trans = f.read(); vid.transErr = ""
-        None | cmd(f'rm tmpTrans/*') | ignore()
+        try: vid.trans = getVtt(model.transcribe(f"vids/{vid.vidId}", beam_size=1)[0]); vid.transErr = ""
+        except Exception as e: vid.transErr = f"Tried to transcribe, encountered error: {type(e)} | {e} | {traceback.format_exc()}"
 
 @k1.cron(delay=10)
 def summarizeLoop():
     if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
     for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null"):
         access = db["access"][accessId]; vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
-        res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small errors, correct it if necessary"})
+        res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small spelling errors, correct it if necessary"})
         try: access.chatId = int(res.text.strip())
         except Exception as e: access.chatId = f"error: {res.text.strip()}"
 
