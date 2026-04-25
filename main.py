@@ -3,7 +3,10 @@ import magic
 from urllib.parse import urlparse, parse_qs
 from schemaParser import *
 
+settings.timezone = "Asia/Hanoi"
 yt_dlp = "/home/kelvin/envs/torch/bin/yt-dlp"
+aiServer = "https://ai.aigu.vn"
+ytServer = "https://yt.aigu.vn"
 
 db = sql("dbs/main.db", mode="lite", manage=True)["default"]
 db.query("""CREATE TABLE IF NOT EXISTS videos (
@@ -40,29 +43,29 @@ app = web.Flask(__name__)
 @app.route("/test")
 def test(): return "ok"
 
-def sendAiServer(js): return requests.post("https://ai.aigu.vn/ingest?token=" + k1.aes_encrypt_json({"app": "yt", "timeout": int(time.time()) + 20}), json=js)
-def tokenGuard(args):
-    token = args.get('token', default=None)
-    if not token: web.unauthorized("Token not found")
+def sendAiServer(js): return requests.post(f"{aiServer}/ingest?token=" + k1.aes_encrypt_json({"app": "yt", "timeout": int(time.time()) + 20}), json=js)
+def tokenGuard(args, request):
+    token = args.get('token', default=None); redirect = lambda reason: web.redirect(f"{aiServer}/login?token=" + k1.aes_encrypt_json({"url": f"{ytServer}{request.full_path.strip('?')}", "tokenDuration": 86400}))
+    if not token: redirect("Token not found")
     obj = k1.aes_decrypt_json(token)
-    if time.time() > obj["timeout"]: web.unauthorized("Token timed out")
+    if time.time() > obj["timeout"]: redirect("Token timed out")
     if "userId" in obj:
         userId = obj["userId"]; user = db["users"].lookup(id=userId)
         if user is None:
             res = sendAiServer({"cmd": "newSchedule", "userId": userId, "title": "Youtube summaries"})
-            if not res.ok: web.unauthorized(f"Tried to initialize user {userId} on ai.aigu.vn but can't for some reason: {res.text}")
+            if not res.ok: web.unauthorized(f"Tried to initialize user {userId} on {aiServer} but can't for some reason: {res.text}")
             db["users"].insert(id=userId, scheduleId=int(res.text))
     obj["token"] = token; return obj
 
-def vidGuard(args, vidId):
-    obj = tokenGuard(args)
+def vidGuard(args, vidId, request):
+    obj = tokenGuard(args, request)
     if db["access"].lookup(vidId=vidId, userId=obj["userId"]) is None: web.unauthorized("User not authorized to view/modify this video")
     return obj
 
 @app.route("/", daisyEnv=True, guard=tokenGuard)
 def index(guardRes):
-    pre = init._jsDAuto()
-    ui1 = db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, v.title from videos v join access a on v.id = a.vidId where userId = ? order by v.id desc", guardRes['userId']) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ti: [i,vi,
+    pre = init._jsDAuto(); user = db["users"][guardRes['userId']]
+    ui1 = db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, v.title from videos v join access a on v.id = a.vidId where userId = ? order by v.id desc", user.id) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ti: [i,vi,
             'none' if ve is None else ('error' if ve else 'yes'),
             'none' if te is None else ('error' if te else 'yes'),dur,
             'none' if cId is None else ('error' if isinstance(cId, str) else cId),cls,ti])\
@@ -71,14 +74,15 @@ def index(guardRes):
 <div id="main" style="display: flex; flex-direction: column">
     <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
         <h2>Videos</h2>
-        <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" />
-        <button id="{pre}_newBtn" class="btn">{k1.Icon.add()}</button>
+        <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus />
+        <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()" onkeydown="if(event.key == 'Enter') {pre}_new();">{k1.Icon.add()}</button>
+        <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
     </div>
     <div style="overflow-x: auto; width: 100%">{ui1}</div>
     <div id="{pre}_res"></div></div>
 <script>
     function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
-    {pre}_newBtn.onclick = async () => {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
+    async function {pre}_new() {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
 </script>"""
 
 @app.route("/api/vid/new", methods=["POST"], guard=tokenGuard)
@@ -126,7 +130,7 @@ def fragment_vid(vidId, guardRes):
 def mfragment_vid(vidId, guardRes):
     pre = init._jsDAuto(); vid = db["videos"][vidId]; vidTag = ""; transTag = ""; chatTag = ""; access = db["access"].lookup(vidId=vid.id, userId=guardRes["userId"]); user = db["users"][access.userId]
     if vid.transErr == "": transTag = f"""<textarea class="textarea textarea-bordered" style="width: 100%; height: 360px">{vid.trans}</textarea>"""
-    if isinstance(access.chatId, int): chatTag = f" - <a href='https://ai.aigu.vn/schedules/{user.scheduleId}/{access.chatId}' target='_blank' style='color: blue'>Summary</a>"
+    if isinstance(access.chatId, int): chatTag = f" - <a href='{aiServer}/schedules/{user.scheduleId}/{access.chatId}' target='_blank' style='color: blue'>Summary</a>"
     return f"""<style>#{pre}_main {{ flex-direction: row; }} @media (max-width: 800px) {{ #{pre}_main {{ flex-direction: column }} }}</style>
 <h2><a href="{vid.url}" target="_blank">{vid.title}</a>{chatTag}</h2>
 <div id="{pre}_main" style="display: flex; gap: 12px">
@@ -151,7 +155,7 @@ def api_vid_clear(vidId, resource, guardRes):
         access = db["access"].lookup(vidId=vid.id, userId=guardRes['userId'])
         if isinstance(access.chatId, int):
             res = sendAiServer({"cmd": "deleteChat", "chatId": access.chatId}) # deletes old chat from ai server, to prevent clogging things up
-            if not res.ok or res.text.strip() != "ok": web.toast_error("Can't delete chat on ai.aigu.vn")
+            if not res.ok or res.text.strip() != "ok": web.toast_error(f"Can't delete chat on {aiServer}")
         access.chatId = None
     if resource == "title":    vid.title = None
     if resource == "retain":   vid.retain = True
@@ -164,7 +168,7 @@ def titleLoop():
         elif vid.provider == "dailymotion": vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.dailymotion.com/video/{vid.vidId}') | deref() | join("\n")
         else: vid.title = f"Unknown provider {vid.provider}"
 
-@k1.cron(delay=10)
+@k1.cron(delay=60)
 def vidLoop(): # auto detects videos that need to be taken care of
     for vid in db["videos"].select("where vidErr is null limit 1"):
         print(f"vid: {vid.id}, provider: {vid.provider}")
@@ -183,6 +187,7 @@ def magicLoop():
 
 @k1.cron(delay=10)
 def matroskaLoop(): # detects videos that are of matroska format, and reformat it to webm so browsers can actually play it
+    return # mostly discarded anyway, so let's not waste cpu cycles on this
     for vid in db["videos"].select("where mime = 'video/x-matroska'"):
         print(f"matroska: {vid.id}")
         res = None | cmd(f"ffmpeg -i vids/{vid.vidId} -c:v libvpx -crf 10 -b:v 2M -c:a libvorbis tmpVids/output.webm", mode=0) | deref()
@@ -201,7 +206,7 @@ def durationLoop():
         print(f"duration: {vid.id}")
         vid.duration = None | cmd(f"ffprobe -v error -show_entries format=duration -of default=nw=1 -i vids/{vid.vidId}") | join("") | op().strip().replace("duration=", "") | aS(float)
 
-from faster_whisper import WhisperModel; model = WhisperModel("small", device="cuda", compute_type="int8_float16")
+from faster_whisper import WhisperModel, BatchedInferencePipeline; model = BatchedInferencePipeline(model=WhisperModel("medium", device="cpu", compute_type="int8")) # device="cuda", compute_type="int8_float16"
 def seconds_to_vtt_timestamp(seconds: float) -> str:
     total_milliseconds = int(round(seconds * 1000)); hours = total_milliseconds // 3_600_000
     minutes = (total_milliseconds % 3_600_000) // 60_000; secs = (total_milliseconds % 60_000) // 1000
@@ -212,12 +217,12 @@ def getVtt(segments): return "WEBVTT\n\n" + (segments | apply(lambda segment: f"
 def transLoop():
     for vid in db["videos"].select("where vidErr = '' and transErr is null"):
         print(f"transcribe: {vid.id}")
-        try: vid.trans = getVtt(model.transcribe(f"vids/{vid.vidId}", beam_size=1)[0]); vid.transErr = ""
+        try: vid.trans = getVtt(model.transcribe(f"vids/{vid.vidId}", beam_size=1, batch_size=8)[0]); vid.transErr = ""
         except Exception as e: vid.transErr = f"Tried to transcribe, encountered error: {type(e)} | {e} | {traceback.format_exc()}"
 
 @k1.cron(delay=10)
 def summarizeLoop():
-    if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
+    # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
     for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null"):
         access = db["access"][accessId]; vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
         res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small spelling errors, correct it if necessary"})
@@ -258,7 +263,7 @@ def ingest(js):
 @app.route("/serverDef")
 def serverDef(): # server definition so that it can be used by main ai server
     tools = [ytTranscript] | apply(function_to_ollama_tool) | apply(lambda x: {"server": "yt", "schema": x}) | aS(list)
-    res = {"url": "https://yt.aigu.vn", "name": "yt", "descr": "Manages youtube downloads", "tools": tools}; return json.dumps(res)
+    res = {"url": ytServer, "name": "yt", "descr": "Manages youtube downloads", "tools": tools}; return json.dumps(res)
 
 sql.lite_flask(app); k1.logErr.flask(app); k1.cron.flask(app)
 
