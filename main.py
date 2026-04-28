@@ -4,7 +4,7 @@ from urllib.parse import urlparse, parse_qs
 from schemaParser import *
 
 settings.timezone = "Asia/Hanoi"
-yt_dlp = "/home/kelvin/envs/torch/bin/yt-dlp"
+yt_dlp = "/home/kelvin/envs/torch/bin/yt-dlp --js-runtimes 'deno:/home/kelvin/.deno/bin/deno' "
 aiServer = "https://ai.aigu.vn"
 ytServer = "https://yt.aigu.vn"
 
@@ -87,7 +87,7 @@ def index(guardRes):
 
 @app.route("/api/vid/new", methods=["POST"], guard=tokenGuard)
 def api_vid_new(js, guardRes):
-    url = js["url"]; provider = None; userId = guardRes["userId"]
+    url = js["url"]; provider = None; userId = guardRes["userId"]; vidId = None
     if url.startswith("https://www.youtube.com/watch"):
         provider = "yt"; vidId = url.split("/watch")[-1].strip("?").split("&")[0]; vidId = parse_qs(urlparse(url).query).get("v", [None])[0]
     elif url.startswith("https://www.dailymotion.com/video"):
@@ -161,23 +161,26 @@ def api_vid_clear(vidId, resource, guardRes):
     if resource == "retain":   vid.retain = True
     return "ok"
 
+providers = {"yt": "https://www.youtube.com/watch?v=", "dailymotion": "https://www.dailymotion.com/video/"}
+
 @k1.cron(delay=10)
 def titleLoop():
     for vid in db["videos"].select("where title is null"):
-        if   vid.provider == "yt":          vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.youtube.com/watch?v={vid.vidId}')   | deref() | join("\n")
-        elif vid.provider == "dailymotion": vid.title = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" https://www.dailymotion.com/video/{vid.vidId}') | deref() | join("\n")
-        else: vid.title = f"Unknown provider {vid.provider}"
+        if vid.provider in providers:
+            res = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" {providers[vid.provider]}{vid.vidId}', mode=0) | apply(join("\n")) | deref()
+            vid.title = res[0] if res[0].strip() else res | join("\n")
+        else: vid.title = f"Unknown provider {vid.provider}"; continue
 
 @k1.cron(delay=60)
 def vidLoop(): # auto detects videos that need to be taken care of
     for vid in db["videos"].select("where vidErr is null limit 1"):
         print(f"vid: {vid.id}, provider: {vid.provider}")
-        if   vid.provider == "yt":          res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" https://www.youtube.com/watch?v={vid.vidId}',   mode=0) | deref()
-        elif vid.provider == "dailymotion": res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" https://www.dailymotion.com/video/{vid.vidId}', mode=0) | deref()
+        if vid.provider in providers:
+            res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" {providers[vid.provider]}{vid.vidId}', mode=0) | deref()
+            fns = "tmpVids" | ls() | grep("new") | deref()
+            if len(fns) == 0: vid.vidErr = f"Tried to download, no new.mp4 or new.webm or others found in tmpVids: {res}"; continue
+            None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
         else: vid.vidErr = f"Unknown provider '{vid.provider}'"
-        fns = "tmpVids" | ls() | grep("new") | deref()
-        if len(fns) == 0: vid.vidErr = "Tried to download, no new.mp4 or new.webm or others found in tmpVids"; print(f"vidLoop error: {res}"); continue
-        None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
 
 @k1.cron(delay=10)
 def magicLoop():
@@ -206,7 +209,9 @@ def durationLoop():
         print(f"duration: {vid.id}")
         vid.duration = None | cmd(f"ffprobe -v error -show_entries format=duration -of default=nw=1 -i vids/{vid.vidId}") | join("") | op().strip().replace("duration=", "") | aS(float)
 
-from faster_whisper import WhisperModel, BatchedInferencePipeline; model = BatchedInferencePipeline(model=WhisperModel("medium", device="cpu", compute_type="int8")) # device="cuda", compute_type="int8_float16"
+from faster_whisper import WhisperModel, BatchedInferencePipeline; model = BatchedInferencePipeline(model=WhisperModel("large-v3-turbo", device="cuda", compute_type="int8_float16"))
+# gpu: device="cuda", compute_type="int8_float16"
+# cpu: device="cpu", compute_type="int8", cpu_threads=16
 def seconds_to_vtt_timestamp(seconds: float) -> str:
     total_milliseconds = int(round(seconds * 1000)); hours = total_milliseconds // 3_600_000
     minutes = (total_milliseconds % 3_600_000) // 60_000; secs = (total_milliseconds % 60_000) // 1000
@@ -225,7 +230,7 @@ def summarizeLoop():
     # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
     for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null"):
         access = db["access"][accessId]; vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
-        res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small spelling errors, correct it if necessary"})
+        res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
         try: access.chatId = int(res.text.strip())
         except Exception as e: access.chatId = f"error: {res.text.strip()}"
 
