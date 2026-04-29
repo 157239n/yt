@@ -77,8 +77,8 @@ def index(guardRes):
 <div id="main" style="display: flex; flex-direction: column">
     <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
         <h2>Videos</h2>
-        <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus />
-        <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()" onkeydown="if(event.key == 'Enter') {pre}_new();">{k1.Icon.add()}</button>
+        <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
+        <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button>
         <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
     </div>
     <div style="overflow-x: auto; width: 100%">{ui1}</div>
