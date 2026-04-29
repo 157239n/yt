@@ -56,6 +56,9 @@ def tokenGuard(args, request):
             if not res.ok: web.unauthorized(f"Tried to initialize user {userId} on {aiServer} but can't for some reason: {res.text}")
             db["users"].insert(id=userId, scheduleId=int(res.text))
     obj["token"] = token; return obj
+def adminGuard(args, request):
+    obj = tokenGuard(args, request)
+    if obj.get("userId", 0) != 1: web.unauthorized()
 
 def vidGuard(args, vidId, request):
     obj = tokenGuard(args, request)
@@ -272,7 +275,7 @@ def serverDef(): # server definition so that it can be used by main ai server
     tools = [ytTranscript] | apply(function_to_ollama_tool) | apply(lambda x: {"server": "yt", "schema": x}) | aS(list)
     res = {"url": ytServer, "name": "yt", "descr": "Manages youtube downloads", "tools": tools}; return json.dumps(res)
 
-sql.lite_flask(app); k1.logErr.flask(app); k1.cron.flask(app)
+sql.lite_flask(app, guard=adminGuard); k1.logErr.flask(app, guard=adminGuard); k1.cron.flask(app, guard=adminGuard)
 
 app.run(host="0.0.0.0", port=5008) # same as normal flask code
 
