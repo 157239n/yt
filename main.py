@@ -229,9 +229,11 @@ def transLoop():
 def summarizeLoop():
     # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
     for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null"):
-        access = db["access"][accessId]; vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
-        res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize it in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
-        try: access.chatId = int(res.text.strip())
+        access = db["access"][accessId]
+        try:
+            vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
+            res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
+            access.chatId = int(res.text.strip())
         except Exception as e: access.chatId = f"error: {res.text.strip()}"
 
 @k1.cron(delay=10)
