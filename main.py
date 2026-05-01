@@ -43,16 +43,16 @@ app = web.Flask(__name__)
 @app.route("/test")
 def test(): return "ok"
 
-def sendAiServer(js): return requests.post(f"{aiServer}/ingest?token=" + k1.aes_encrypt_json({"app": "yt", "timeout": int(time.time()) + 20}), json=js)
+def sendAiServer(userId, js): return requests.post(f"{aiServer}/ingest?token=" + k1.aes_encrypt_json({"serverName": "yt", "userId": userId, "timeout": int(time.time()) + 20}), json=js)
 def tokenGuard(args, request):
-    token = args.get('token', default=None); redirect = lambda reason: web.redirect(f"{aiServer}/login?token=" + k1.aes_encrypt_json({"url": f"{ytServer}{request.full_path.strip('?')}", "tokenDuration": 86400}))
+    token = args.get('token', default=None); redirect = lambda reason: web.redirect(f"{aiServer}/login?token=" + k1.aes_encrypt_json({"url": f"{ytServer}{request.full_path.strip('?')}", "tokenDuration": 86400, "timeout": int(time.time()) + 20}))
     if not token: redirect("Token not found")
     obj = k1.aes_decrypt_json(token)
     if time.time() > obj["timeout"]: redirect("Token timed out")
     if "userId" in obj:
         userId = obj["userId"]; user = db["users"].lookup(id=userId)
         if user is None:
-            res = sendAiServer({"cmd": "newSchedule", "userId": userId, "title": "Youtube summaries"})
+            res = sendAiServer(userId, {"cmd": "newSchedule", "title": "Youtube summaries"})
             if not res.ok: web.unauthorized(f"Tried to initialize user {userId} on {aiServer} but can't for some reason: {res.text}")
             db["users"].insert(id=userId, scheduleId=int(res.text))
     obj["token"] = token; return obj
@@ -88,6 +88,7 @@ def index(guardRes):
     async function {pre}_new() {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
 </script>"""
 
+import secrets, string
 @app.route("/api/vid/new", methods=["POST"], guard=tokenGuard)
 def api_vid_new(js, guardRes):
     url = js["url"]; provider = None; userId = guardRes["userId"]; vidId = None
@@ -95,6 +96,9 @@ def api_vid_new(js, guardRes):
         provider = "yt"; vidId = url.split("/watch")[-1].strip("?").split("&")[0]; vidId = parse_qs(urlparse(url).query).get("v", [None])[0]
     elif url.startswith("https://www.dailymotion.com/video"):
         provider = "dailymotion"; vidId = url.split("/video/")[1].split("/")[0].split("?")[0].split("&")[0].strip()
+    elif url.startswith("fs:"):
+        fullFn = url.split("fs:")[1]; fn = fullFn.split("/")[-1]; vidId = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12)); provider = "fs"
+        db["videos"].insert(url=fullFn, vidId=vidId, title=fn, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider="fs", retain=0, cleaned=0)
     if vidId is None: web.toast_error("Can't extract vidId")
     if provider is None: web.toast_error("Don't know what service (youtube, dailymotion, etc) this url belongs to")
     vid = db["videos"].lookup(vidId=vidId, provider=provider)
@@ -157,7 +161,7 @@ def api_vid_clear(vidId, resource, guardRes):
     if resource == "chatId":
         access = db["access"].lookup(vidId=vid.id, userId=guardRes['userId'])
         if isinstance(access.chatId, int):
-            res = sendAiServer({"cmd": "deleteChat", "chatId": access.chatId}) # deletes old chat from ai server, to prevent clogging things up
+            res = sendAiServer(access.userId, {"cmd": "deleteChat", "chatId": access.chatId}) # deletes old chat from ai server, to prevent clogging things up
             if not res.ok or res.text.strip() != "ok": web.toast_error(f"Can't delete chat on {aiServer}")
         access.chatId = None
     if resource == "title":    vid.title = None
@@ -174,6 +178,7 @@ def titleLoop():
             vid.title = res[0] if res[0].strip() else res | join("\n")
         else: vid.title = f"Unknown provider {vid.provider}"; continue
 
+import shlex
 @k1.cron(delay=60)
 def vidLoop(): # auto detects videos that need to be taken care of
     for vid in db["videos"].select("where vidErr is null limit 1"):
@@ -183,6 +188,9 @@ def vidLoop(): # auto detects videos that need to be taken care of
             fns = "tmpVids" | ls() | grep("new") | deref()
             if len(fns) == 0: vid.vidErr = f"Tried to download, no new.mp4 or new.webm or others found in tmpVids: {res}"; continue
             None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
+        elif vid.provider == "fs":
+            None | cmd(f"cp {shlex.quote(vid.url)} vids/{vid.vidId}") | ignore()
+            vid.vidErr = "" if os.path.exists(f"vids/{vid.vidId}") else "Tried to copy the file over but can't for some reason"
         else: vid.vidErr = f"Unknown provider '{vid.provider}'"
 
 @k1.cron(delay=10)
@@ -194,7 +202,7 @@ def magicLoop():
 @k1.cron(delay=10)
 def matroskaLoop(): # detects videos that are of matroska format, and reformat it to webm so browsers can actually play it
     return # mostly discarded anyway, so let's not waste cpu cycles on this
-    for vid in db["videos"].select("where mime = 'video/x-matroska'"):
+    for vid in db["videos"].select("where mime = 'video/x-matroska' limit 1"):
         print(f"matroska: {vid.id}")
         res = None | cmd(f"ffmpeg -i vids/{vid.vidId} -c:v libvpx -crf 10 -b:v 2M -c:a libvorbis tmpVids/output.webm", mode=0) | deref()
         fns = "tmpVids" | ls() | grep("output.webm") | deref()
@@ -223,19 +231,19 @@ def getVtt(segments): return "WEBVTT\n\n" + (segments | apply(lambda segment: f"
 
 @k1.cron(delay=10)
 def transLoop():
-    for vid in db["videos"].select("where vidErr = '' and transErr is null"):
+    for vid in db["videos"].select("where vidErr = '' and transErr is null limit 1"):
         print(f"transcribe: {vid.id}")
         try: vid.trans = getVtt(model.transcribe(f"vids/{vid.vidId}", beam_size=1, batch_size=8)[0]); vid.transErr = ""
         except Exception as e: vid.transErr = f"Tried to transcribe, encountered error: {type(e)} | {e} | {traceback.format_exc()}"
 
-@k1.cron(delay=10)
+@k1.cron(delay=1)
 def summarizeLoop():
     # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
-    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null"):
+    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null limit 1"):
         access = db["access"][accessId]
         try:
             vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
-            res = sendAiServer({"cmd": "scheduleNewChat", "scheduleId": user.scheduleId, "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
+            res = sendAiServer(user.id, {"cmd": "scheduleNewChat", "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
             access.chatId = int(res.text.strip())
         except Exception as e: access.chatId = f"error: {res.text.strip()}"
 
@@ -254,7 +262,7 @@ def ytRecents() -> dict:
 def ytTranscript(vidId:str, env) -> str:
     """Get transcript of specific youtube video"""
     yield {"type": "status", "content": "Fetching transcript"}
-    return api_vid_transcript(vidId)
+    return api_vid_transcript(vidId, "vtt")
 
 toolsD = {"ytTranscript": ytTranscript}
 
@@ -273,7 +281,7 @@ def ingest(js):
 @app.route("/serverDef")
 def serverDef(): # server definition so that it can be used by main ai server
     tools = [ytTranscript] | apply(function_to_ollama_tool) | apply(lambda x: {"server": "yt", "schema": x}) | aS(list)
-    res = {"url": ytServer, "name": "yt", "descr": "Manages youtube downloads", "tools": tools}; return json.dumps(res)
+    res = {"url": ytServer, "name": "yt", "descr": "Manages youtube downloads", "tools": tools, "userMode": "mirror"}; return json.dumps(res)
 
 sql.lite_flask(app, guard=adminGuard); k1.logErr.flask(app, guard=adminGuard); k1.cron.flask(app, guard=adminGuard)
 
