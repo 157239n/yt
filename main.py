@@ -284,7 +284,7 @@ def serverDef(): # server definition so that it can be used by main ai server
     res = {"url": ytServer, "name": "yt", "descr": "Manages youtube downloads", "tools": tools, "userMode": "mirror"}; return json.dumps(res)
 
 @app.route("/api/restart", guard=adminGuard)
-def restart(): None | cmd("touch main.py") | ignore(); return "ok"
+def restart(): None | cmd("touch main.py") | ignore(); return "ok", 200, {"Access-Control-Allow-Origin": "*"}
 
 sql.lite_flask(app, guard=adminGuard); k1.logErr.flask(app, guard=adminGuard); k1.cron.flask(app, guard=adminGuard)
 
