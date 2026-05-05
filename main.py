@@ -22,7 +22,8 @@ db.query("""CREATE TABLE IF NOT EXISTS videos (
     duration    REAL,    -- duration of the video in seconds
     provider    TEXT,    -- what provider this video belongs to. yt/dailymotion
     retain      BOOL,    -- if True, retains the video, else deletes it to save space
-    cleaned     BOOL     -- whether this video has been removed to save space?
+    cleaned     BOOL,    -- whether this video has been removed to save space?
+    channelId   INTEGER  -- what youtube channel does this video belong to?
 );""")
 db.query("CREATE INDEX IF NOT EXISTS videos_vidId ON videos (vidId);")
 db.query("""CREATE TABLE IF NOT EXISTS users ( -- this is just to keep track of what user has been initialized
@@ -38,6 +39,14 @@ db.query("""CREATE TABLE IF NOT EXISTS access ( -- track what user has access to
 db.query("CREATE INDEX IF NOT EXISTS access_vidId ON access (vidId);")
 db.query("CREATE INDEX IF NOT EXISTS access_userId ON access (userId);")
 
+db.query("""CREATE TABLE IF NOT EXISTS channels ( -- tracks youtube channels
+    id          INTEGER primary key autoincrement,
+    provider    TEXT, -- only yt for now
+    handle      TEXT, -- channel names, starts with @
+    name        TEXT, -- channel display name
+    fullscanErr TEXT  -- if successful, an empty string, if not executed, null, else error
+);""")
+
 app = web.Flask(__name__)
 
 @app.route("/test")
@@ -52,7 +61,7 @@ def tokenGuard(args, request):
     if "userId" in obj:
         userId = obj["userId"]; user = db["users"].lookup(id=userId)
         if user is None:
-            res = sendAiServer(userId, {"cmd": "newSchedule", "title": "Youtube summaries"})
+            res = sendAiServer(userId, {"cmd": "newSchedule", "title": "Youtube summaries (yt app)"})
             if not res.ok: web.unauthorized(f"Tried to initialize user {userId} on {aiServer} but can't for some reason: {res.text}")
             db["users"].insert(id=userId, scheduleId=int(res.text))
     obj["token"] = token; return obj
@@ -68,11 +77,11 @@ def vidGuard(args, vidId, request):
 @app.route("/", daisyEnv=True, guard=tokenGuard)
 def index(guardRes):
     pre = init._jsDAuto(); user = db["users"][guardRes['userId']]
-    ui1 = db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, v.title from videos v join access a on v.id = a.vidId where userId = ? order by v.id desc", user.id) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ti: [i,vi,
+    ui1 = db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where userId = ? order by v.id desc", user.id) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ha,ti: [i,vi,
             'none' if ve is None else ('error' if ve else 'yes'),
             'none' if te is None else ('error' if te else 'yes'),dur,
-            'none' if cId is None else ('error' if isinstance(cId, str) else cId),cls,ti])\
-        | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatId", "cleaned", "title"], onclickFName=f"{pre}_select", selectable=True, height=400)) | op().interface() | toHtml()
+            'none' if cId is None else ('error' if isinstance(cId, str) else cId),cls,ha,ti])\
+        | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatId", "cleaned", "handle", "title"], onclickFName=f"{pre}_select", selectable=True, height=400)) | op().interface() | toHtml()
     return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
 <div id="main" style="display: flex; flex-direction: column">
     <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
@@ -82,20 +91,19 @@ def index(guardRes):
         <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
     </div>
     <div style="overflow-x: auto; width: 100%">{ui1}</div>
-    <div id="{pre}_res"></div></div>
+    <div id="{pre}_res"></div></div>{fragment_channels(user, guardRes)}
 <script>
     function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
     async function {pre}_new() {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
 </script>"""
 
 import secrets, string
+def getYtVidId(url): vidId = url.split("/watch")[-1].strip("?").split("&")[0]; return parse_qs(urlparse(url).query).get("v", [None])[0]
 @app.route("/api/vid/new", methods=["POST"], guard=tokenGuard)
 def api_vid_new(js, guardRes):
     url = js["url"]; provider = None; userId = guardRes["userId"]; vidId = None
-    if url.startswith("https://www.youtube.com/watch"):
-        provider = "yt"; vidId = url.split("/watch")[-1].strip("?").split("&")[0]; vidId = parse_qs(urlparse(url).query).get("v", [None])[0]
-    elif url.startswith("https://www.dailymotion.com/video"):
-        provider = "dailymotion"; vidId = url.split("/video/")[1].split("/")[0].split("?")[0].split("&")[0].strip()
+    if url.startswith("https://www.youtube.com/watch"):       provider = "yt"; vidId = getYtVidId(url)
+    elif url.startswith("https://www.dailymotion.com/video"): provider = "dailymotion"; vidId = url.split("/video/")[1].split("/")[0].split("?")[0].split("&")[0].strip()
     elif url.startswith("fs:"):
         fullFn = url.split("fs:")[1]; fn = fullFn.split("/")[-1]; vidId = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12)); provider = "fs"
         db["videos"].insert(url=fullFn, vidId=vidId, title=fn, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider="fs", retain=0, cleaned=0)
@@ -108,6 +116,91 @@ def api_vid_new(js, guardRes):
         else: db["access"].insert(vidId=vid.id, userId=userId, chatId=None); return "ok"
     vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
     db["access"].insert(vidId=vid.id, userId=userId, chatId=None); return "ok"
+
+def fragment_channels(user, guardRes): pre = init._jsDAuto(); ui1 = db.query(f"select id, provider, handle from channels") | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle"], height=400, onclickFName=f"{pre}_select", selectable=True)) | op().interface() | toHtml(); return f"""
+<div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px; margin-top: 12px">
+    <h2>Channels</h2>
+    <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
+    <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button></div>
+<div style="overflow-x: auto; width: 100%">{ui1}</div><div id="{pre}_res"></div></div>
+<script>function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/fragment/channel/${{row[0]}}?token={guardRes['token']}`); }}
+async function {pre}_new() {{ await wrapToastReq(fetchPost(`/api/channel/new?token={guardRes['token']}`, {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}</script>"""
+
+@app.route("/api/channel/new", methods=["POST"], guard=tokenGuard)
+def api_channel_new(js, guardRes):
+    url = js["url"]; userId = guardRes["userId"]; handle = None
+    if "youtube.com/" in url:
+        if url.startswith("https://www.youtube.com/@"): handle = "@" + url.split("https://www.youtube.com/@")[1].split("/")[0]
+        else: web.toast_error(f"Invalid youtube channel link")
+    if handle is None: web.toast_error("Provider not found")
+    channel = db["channels"].lookup(handle=handle)
+    if channel: web.toast_error("Channel added before!")
+    db["channels"].insert(provider="yt", handle=handle, name=""); return "ok"
+import bs4
+def getUrls(htm):
+    ht = bs4.BeautifulSoup(htm, "html.parser"); urls = []
+    for a in ht.select("ytd-rich-item-renderer"):
+        try: urls.append("https://www.youtube.com" + a.select_one("h3 > a").attrs["href"])
+        except: pass
+    return urls
+def getUrlsFromElems(es):
+    urls = []
+    for i, e in enumerate(es):
+        warnings.warn(f"getUrlsFromElems: {i}")
+        a = bs4.BeautifulSoup(e.innerHTML, "html.parser")
+        try: urls.append("https://www.youtube.com" + a.select_one("h3 > a").attrs["href"])
+        except: pass
+    warnings.warn(f"finished, og es: {len(es)}, urls: {len(urls)}"); return urls
+@app.route("/fragment/channel/<int:channelId>", guard=tokenGuard)
+def fragment_channel(channelId, guardRes): pre = init._jsDAuto(); channel = db["channels"][channelId]; return f"""<h3>Channel {channel.handle}</h3>
+<button class="btn btn-outline" onclick="{pre}_fullScan()"    title="Scan for all videos on the channel, and add each video to the system">Full scan</button>
+<button class="btn btn-outline" onclick="{pre}_partialScan()" title="Scan till there's a farmiliar video, then stop">Partial scan</button>
+<script>function {pre}_fullScan() {{ wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan?token={guardRes['token']}`)); }}
+function {pre}_partialScan() {{ wrapToastReq(fetch(`/api/channel/{channel.id}/partialScan?token={guardRes['token']}`)); }}</script>"""
+
+def getYtVid(url): return db["videos"].lookup(vidId=getYtVidId(url))
+def ingestUrls(urls, guardRes, channel):
+    for url in urls:
+        try: api_vid_new({"url": url}, guardRes)
+        except web._ShortCircuit as e: pass
+        vid = getYtVid(url)
+        if vid: vid.channelId = channel.id
+@app.route("/api/channel/<int:channelId>/fullScan", guard=tokenGuard)
+def api_channel_fullScan(channelId, guardRes):
+    channel = db["channels"][channelId]
+    with zircon.newBrowser() as b:
+        b.pickExtFromGroup("yttri"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(1)
+        main = b.querySelector("div:has(ytd-rich-item-renderer)"); oldHeight = 0
+        for i in range(20):
+            warnings.warn(f"fullScan {i}, {oldHeight}"); newHeight = main.clientHeight
+            if oldHeight == newHeight: break
+            k1.resolve(b._sendExt({"cmd": "scrollAt", "x": 500, "y": 500, "deltaY": 100000})); time.sleep(1)
+        ingestUrls(getUrlsFromElems(b.querySelectorAll("ytd-rich-item-renderer")), guardRes, channel)
+    return "ok"
+def partialScan(b, handle):
+    b.goto(f"https://www.youtube.com/{handle}/videos"); time.sleep(1)
+    main = b.querySelector("div:has(ytd-rich-item-renderer)"); oldHeight = 0; urls = []
+    for i in range(20):
+        newUrls = getUrls(main.innerHTML)
+        for url in newUrls:
+            if getYtVid(url): return urls
+            urls.append(url)
+        newHeight = main.clientHeight
+        if oldHeight == newHeight: break
+        k1.resolve(b._sendExt({"cmd": "scrollAt", "x": 500, "y": 500, "deltaY": 100000}))
+    return urls
+@app.route("/api/channel/<int:channelId>/partialScan", guard=tokenGuard)
+def api_channel_partialScan(channelId, guardRes):
+    channel = db["channels"][channelId]
+    with zircon.newBrowser() as b: b.pickExtFromGroup("yttri"); ingestUrls(partialScan(b, channel.handle), guardRes, channel)
+    return "ok"
+
+@k1.cron(delay=10)
+def channel_fullscan_loop():
+    for channel in db["channels"].select("where fullscanErr is null limit 1"):
+        try: api_channel_fullScan(channel.id, {"userId": 1}); channel.fullscanErr = ""
+        except Exception as e: channel.fullscanErr = f"{type(e)} | {e}\n{traceback.format_exc()}"
+    pass
 
 @app.route("/raw/vid/<int:vidId>", guard=vidGuard)
 def raw_vid(vidId):
@@ -285,6 +378,19 @@ def serverDef(): # server definition so that it can be used by main ai server
 
 @app.route("/api/restart", guard=adminGuard)
 def restart(): None | cmd("touch main.py") | ignore(); return "ok", 200, {"Access-Control-Allow-Origin": "*"}
+
+@app.route("/metrics")
+def metrics():
+    s = ""
+    res = db.query("select count(id) from videos where vidErr = ''")   [0][0]; s += f'yt_vid_count{{status="done"}} {res}\n'
+    res = db.query("select count(id) from videos where vidErr is null")[0][0]; s += f'yt_vid_count{{status="not started"}} {res}\n'
+    res = db.query("select count(id) from videos where vidErr != ''")  [0][0]; s += f'yt_vid_count{{status="error"}} {res}\n'
+    res = db.query("select count(id) from videos where transErr = ''")   [0][0]; s += f'yt_trans_count{{status="done"}} {res}\n'
+    res = db.query("select count(id) from videos where transErr is null")[0][0]; s += f'yt_trans_count{{status="not started"}} {res}\n'
+    res = db.query("select count(id) from videos where transErr != ''")  [0][0]; s += f'yt_trans_count{{status="error"}} {res}\n'
+    for count, status in db.query("select count(id), typeof(chatId) as ct from access group by ct") | lookup({"integer": "done", "null": "not started", "text": "error"}, 1):
+        s += f'yt_chats_count{{status="{status}"}} {count}\n'
+    return s
 
 sql.lite_flask(app, guard=adminGuard); k1.logErr.flask(app, guard=adminGuard); k1.cron.flask(app, guard=adminGuard)
 
