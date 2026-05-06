@@ -83,18 +83,27 @@ def vidGuard(args, vidId, request):
 def index(guardRes):
     pre = init._jsDAuto(); user = db["users"][guardRes['userId']]
     sel = ["null", *db.query("select handle from channels") | cut(0)] | insId() | ~apply(lambda i, x: f"<option value='{x}' {'selected' if i == 0 else ''}>{x}</option>") | join("")
+    recents = db.query("select v.id, v.vidId, v.duration, a.chatId, v.vidTime, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where a.chatId is not null and a.archived = 0 order by a.chatId desc limit 300")\
+        | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "duration", "chatId", "vidTime", "handle", "title"], onclickFName="vid_select", selectable=True, height=400)) | op().interface() | toHtml()
     return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
 <div id="main" style="display: flex; flex-direction: column">
-    <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
-        <h2>Videos</h2>
-        <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
-        <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button>
-        <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
+    <div style="display: flex; flex-direction: row">
+        <div style="flex: 1; overflow-x: auto">
+            <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
+                <h2>Videos</h2>
+                <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
+                <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button>
+                <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
+            </div>
+            <div style="display: flex; flex-direction: row; align-items: center; gap: 8px"><div>Channel</div>
+                <select id="{pre}_sel" class="select input-bordered" style="width: fit-content">{sel}</select></div>
+            <div id="{pre}_table" style="overflow-x: auto; width: 100%"></div>
+        </div>
+        <div style="flex: 1; overflow-x: auto; display: flex; flex-direction: column">
+            <div style="flex: 1"></div><h2>Recents</h2>{recents}</div>
     </div>
-    <div style="display: flex; flex-direction: row; align-items: center; gap: 8px"><div>Channel</div>
-        <select id="{pre}_sel" class="select input-bordered" style="width: fit-content">{sel}</select></div>
-    <div id="{pre}_table" style="overflow-x: auto; width: 100%"></div>
-    <div id="{pre}_res"></div></div>{fragment_channels(user, guardRes)}
+    <div id="{pre}_res"></div></div>
+    {fragment_channels(user, guardRes)}
 <script>
     function vid_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
     async function {pre}_new() {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
@@ -131,7 +140,11 @@ def api_vid_new(js, guardRes):
     vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
     db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
 
-def fragment_channels(user, guardRes): pre = init._jsDAuto(); ui1 = db.query(f"select id, provider, handle, fullscanErr from channels") | apply(lambda x: 'null' if x is None else ("yes" if x == "" else "error"), 3) | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle", "fullscanErr"], height=400, onclickFName=f"{pre}_select", selectable=True)) | op().interface() | toHtml(); return f"""
+def fragment_channels(user, guardRes):
+    pre = init._jsDAuto()
+    d = db.query("select c.id, sum(a.archived), count(a.id) from access a join videos v on a.vidId = v.id join channels c on v.channelId = c.id group by c.id") | ~apply(lambda a,b,c: [a,f"{b}/{c}"]) | toDict()
+    ui1 = db.query(f"select id, provider, handle, fullscanErr, id from channels") | lookup(d, 4, fill="(no data)") | apply(lambda x: 'null' if x is None else ("yes" if x == "" else "error"), 3) | deref()\
+        | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle", "fullscanErr", "archived rate"], height=400, onclickFName=f"{pre}_select", selectable=True)) | op().interface() | toHtml(); return f"""
 <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px; margin-top: 12px">
     <h2>Channels</h2>
     <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
@@ -183,7 +196,7 @@ def ingestUrls(urls, guardRes, channel):
 def api_channel_fullScan(channelId, guardRes):
     channel = db["channels"][channelId]
     with zircon.newBrowser() as b:
-        b.pickExtFromGroup("yttri"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(1)
+        b.pickExtFromGroup("site"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(1)
         main = b.querySelector("div:has(ytd-rich-item-renderer)"); oldHeight = 0
         for i in range(20):
             warnings.warn(f"fullScan {i}, {oldHeight}"); newHeight = main.clientHeight
@@ -211,6 +224,7 @@ def api_channel_partialScan(channelId, guardRes):
 
 @k1.cron(delay=10)
 def channel_fullscan_loop():
+    return
     for channel in db["channels"].select("where fullscanErr is null limit 1"):
         try: api_channel_fullScan(channel.id, {"userId": 1}); channel.fullscanErr = ""; channel.fullscanTime = int(time.time())
         except Exception as e: channel.fullscanErr = f"{type(e)} | {e}\n{traceback.format_exc()}"
@@ -293,6 +307,7 @@ def titleLoop():
 import shlex
 @k1.cron(delay=60)
 def vidLoop(): # auto detects videos that need to be taken care of
+    return
     for vid in db["videos"].select("where vidErr is null and title is not null order by id desc limit 1"):
         print(f"vid: {vid.id}, provider: {vid.provider}")
         if vid.provider in providers:
