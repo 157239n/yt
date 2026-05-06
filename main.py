@@ -23,28 +23,33 @@ db.query("""CREATE TABLE IF NOT EXISTS videos (
     provider    TEXT,    -- what provider this video belongs to. yt/dailymotion
     retain      BOOL,    -- if True, retains the video, else deletes it to save space
     cleaned     BOOL,    -- whether this video has been removed to save space?
-    channelId   INTEGER  -- what youtube channel does this video belong to?
+    channelId   INTEGER, -- what youtube channel does this video belong to?
+    vidTime     INTEGER  -- what time does the vid finishes downloading?
 );""")
 db.query("CREATE INDEX IF NOT EXISTS videos_vidId ON videos (vidId);")
+db.query("CREATE INDEX IF NOT EXISTS videos_channelId ON videos (channelId);")
 db.query("""CREATE TABLE IF NOT EXISTS users ( -- this is just to keep track of what user has been initialized
     id          INTEGER primary key, -- no autoincrement because ground truth is on ai server's db
     scheduleId  INTEGER              -- scheduleId just for this youtube app
 );""")
 db.query("""CREATE TABLE IF NOT EXISTS access ( -- track what user has access to what videos
-    id          INTEGER primary key, -- no autoincrement because ground truth is on ai server's db
-    vidId       INTEGER,
-    userId      INTEGER,
-    chatId      INTEGER  -- chatId for this particular video summary. Can be a string for error message
+    id           INTEGER primary key, -- no autoincrement because ground truth is on ai server's db
+    vidId        INTEGER,
+    userId       INTEGER,
+    chatId       INTEGER, -- chatId for this particular video summary. Can be a string for error message
+    archived     BOOL,    -- this and one below synced from ai server, to do a bunch of calcs and whatnot
+    archivedTime INTEGER
 );""")
 db.query("CREATE INDEX IF NOT EXISTS access_vidId ON access (vidId);")
 db.query("CREATE INDEX IF NOT EXISTS access_userId ON access (userId);")
 
 db.query("""CREATE TABLE IF NOT EXISTS channels ( -- tracks youtube channels
-    id          INTEGER primary key autoincrement,
-    provider    TEXT, -- only yt for now
-    handle      TEXT, -- channel names, starts with @
-    name        TEXT, -- channel display name
-    fullscanErr TEXT  -- if successful, an empty string, if not executed, null, else error
+    id           INTEGER primary key autoincrement,
+    provider     TEXT,   -- only yt for now
+    handle       TEXT,   -- channel names, starts with @
+    name         TEXT,   -- channel display name
+    fullscanErr  TEXT,   -- if successful, an empty string, if not executed, null, else error
+    fullscanTime INTEGER -- time when finishes last full scan
 );""")
 
 app = web.Flask(__name__)
@@ -77,11 +82,7 @@ def vidGuard(args, vidId, request):
 @app.route("/", daisyEnv=True, guard=tokenGuard)
 def index(guardRes):
     pre = init._jsDAuto(); user = db["users"][guardRes['userId']]
-    ui1 = db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where userId = ? order by v.id desc", user.id) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ha,ti: [i,vi,
-            'none' if ve is None else ('error' if ve else 'yes'),
-            'none' if te is None else ('error' if te else 'yes'),dur,
-            'none' if cId is None else ('error' if isinstance(cId, str) else cId),cls,ha,ti])\
-        | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatId", "cleaned", "handle", "title"], onclickFName=f"{pre}_select", selectable=True, height=400)) | op().interface() | toHtml()
+    sel = ["null", *db.query("select handle from channels") | cut(0)] | insId() | ~apply(lambda i, x: f"<option value='{x}' {'selected' if i == 0 else ''}>{x}</option>") | join("")
     return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
 <div id="main" style="display: flex; flex-direction: column">
     <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
@@ -90,12 +91,25 @@ def index(guardRes):
         <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button>
         <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
     </div>
-    <div style="overflow-x: auto; width: 100%">{ui1}</div>
+    <div style="display: flex; flex-direction: row; align-items: center; gap: 8px"><div>Channel</div>
+        <select id="{pre}_sel" class="select input-bordered" style="width: fit-content">{sel}</select></div>
+    <div id="{pre}_table" style="overflow-x: auto; width: 100%"></div>
     <div id="{pre}_res"></div></div>{fragment_channels(user, guardRes)}
 <script>
-    function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
+    function vid_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
     async function {pre}_new() {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
+    {pre}_sel.oninput = () => {{ dynamicLoad("#{pre}_table", `/fragment/vids/${{{pre}_sel.value}}?token={guardRes['token']}`); }}; {pre}_sel.oninput();
 </script>"""
+
+@app.route("/fragment/vids/<handle>", guard=tokenGuard)
+def fragment_vids(handle, guardRes):
+    clause = "and c.handle is null" if handle == "null" else f"and c.handle = '{handle}'"; user = db["users"][guardRes['userId']]
+    return db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, a.archived, c.handle, v.vidTime, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where userId = ? {clause} order by a.chatId desc", user.id) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ar,ha,vt,ti: [i,vi,
+            'none' if ve is None else ('error' if ve else 'yes'),
+            'none' if te is None else ('error' if te else 'yes'),dur,
+            'none' if cId is None else ('error' if isinstance(cId, str) else cId),cls,ar,ha,vt | (tryout() | toIso() | op().replace(*"T ")),ti])\
+        | deref() | (toJsFunc("term", ("archived", ["true", "false", "both"], "false")) | grep("${term}") | filt("x if archived == 'true' else ((not x) if archived == 'false' else true)", 7)\
+            | (shape(0) | aS('f"#rows: {x}"')) & viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatId", "cleaned", "archived", "handle", "vidTime", "title"], onclickFName=f"vid_select", selectable=True, height=400)) | op().interface() | toHtml()
 
 import secrets, string
 def getYtVidId(url): vidId = url.split("/watch")[-1].strip("?").split("&")[0]; return parse_qs(urlparse(url).query).get("v", [None])[0]
@@ -113,11 +127,11 @@ def api_vid_new(js, guardRes):
     if vid:
         hasAccess = db["access"].lookup(vidId=vid.id, userId=userId)
         if hasAccess: web.toast_error("Video added before!")
-        else: db["access"].insert(vidId=vid.id, userId=userId, chatId=None); return "ok"
+        else: db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
     vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
-    db["access"].insert(vidId=vid.id, userId=userId, chatId=None); return "ok"
+    db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
 
-def fragment_channels(user, guardRes): pre = init._jsDAuto(); ui1 = db.query(f"select id, provider, handle from channels") | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle"], height=400, onclickFName=f"{pre}_select", selectable=True)) | op().interface() | toHtml(); return f"""
+def fragment_channels(user, guardRes): pre = init._jsDAuto(); ui1 = db.query(f"select id, provider, handle, fullscanErr from channels") | apply(lambda x: 'null' if x is None else ("yes" if x == "" else "error"), 3) | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle", "fullscanErr"], height=400, onclickFName=f"{pre}_select", selectable=True)) | op().interface() | toHtml(); return f"""
 <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px; margin-top: 12px">
     <h2>Channels</h2>
     <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
@@ -198,9 +212,14 @@ def api_channel_partialScan(channelId, guardRes):
 @k1.cron(delay=10)
 def channel_fullscan_loop():
     for channel in db["channels"].select("where fullscanErr is null limit 1"):
-        try: api_channel_fullScan(channel.id, {"userId": 1}); channel.fullscanErr = ""
+        try: api_channel_fullScan(channel.id, {"userId": 1}); channel.fullscanErr = ""; channel.fullscanTime = int(time.time())
         except Exception as e: channel.fullscanErr = f"{type(e)} | {e}\n{traceback.format_exc()}"
-    pass
+
+@k1.cron(delay=60)
+def archivedSyncLoop():
+    chatIds = db.query("select chatId from access where (archived is null or archived = 0) and chatId is not null") | cut(0) | aS(list)
+    for chatId, archivedTime in sendAiServer(1, {"cmd": "syncArchived", "chatIds": chatIds}).json():
+        access = db["access"].lookup(chatId=chatId); access.archived = 1; access.archivedTime = archivedTime
 
 @app.route("/raw/vid/<int:vidId>", guard=vidGuard)
 def raw_vid(vidId):
@@ -274,13 +293,13 @@ def titleLoop():
 import shlex
 @k1.cron(delay=60)
 def vidLoop(): # auto detects videos that need to be taken care of
-    for vid in db["videos"].select("where vidErr is null limit 1"):
+    for vid in db["videos"].select("where vidErr is null and title is not null order by id desc limit 1"):
         print(f"vid: {vid.id}, provider: {vid.provider}")
         if vid.provider in providers:
             res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" {providers[vid.provider]}{vid.vidId}', mode=0) | deref()
             fns = "tmpVids" | ls() | grep("new") | deref()
             if len(fns) == 0: vid.vidErr = f"Tried to download, no new.mp4 or new.webm or others found in tmpVids: {res}"; continue
-            None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""
+            None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.vidErr = ""; vid.vidTime = int(time.time())
         elif vid.provider == "fs":
             None | cmd(f"cp {shlex.quote(vid.url)} vids/{vid.vidId}") | ignore()
             vid.vidErr = "" if os.path.exists(f"vids/{vid.vidId}") else "Tried to copy the file over but can't for some reason"
@@ -332,7 +351,7 @@ def transLoop():
 @k1.cron(delay=1)
 def summarizeLoop():
     # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
-    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null limit 1"):
+    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and a.chatId is null order by a.id limit 1"):
         access = db["access"][accessId]
         try:
             vid = db["videos"][vidId]; user = db["users"][access.userId]; print(f"summarize: {vid.id}")
@@ -390,6 +409,10 @@ def metrics():
     res = db.query("select count(id) from videos where transErr != ''")  [0][0]; s += f'yt_trans_count{{status="error"}} {res}\n'
     for count, status in db.query("select count(id), typeof(chatId) as ct from access group by ct") | lookup({"integer": "done", "null": "not started", "text": "error"}, 1):
         s += f'yt_chats_count{{status="{status}"}} {count}\n'
+    for userId, archivedTime in db.query("select a.userId, sum(v.duration) from videos v join access a on v.id = a.vidId where a.archived = 1 group by a.userId"):
+        s += f'yt_archivedTime_total{{userId="{userId}"}} {archivedTime}\n'
+    for userId, nChats in db.query("select a.userId, count(v.duration) from videos v join access a on v.id = a.vidId where a.archived = 1 group by a.userId"):
+        s += f'yt_archivedChats_count{{userId="{userId}"}} {nChats}\n'
     return s
 
 sql.lite_flask(app, guard=adminGuard); k1.logErr.flask(app, guard=adminGuard); k1.cron.flask(app, guard=adminGuard)
