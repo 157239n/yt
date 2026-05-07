@@ -1,77 +1,83 @@
 from common import *
+from runner import *
+
+def preamble(darkmode): return f"""
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.5.0/github-markdown-{'dark' if darkmode else 'light'}.min.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.js"></script>
+<script>window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']], processEscapes: true }} }};</script>
+<script id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+<style>.chunk > * {{ margin: 0px !important; }} .btn-multiline {{ height: auto !important; min-height: 2.5rem; white-space: normal !important; line-height: 1.3; padding-top: 0.5rem; padding-bottom: 0.5rem; }}
+.markdown-body ol,.markdown-body ul{{margin:.5em 0 .5em 1.5em;padding-left:1.2em}}.markdown-body ul{{list-style:disc}}.markdown-body ul ul{{list-style:circle}}.markdown-body ul ul ul{{list-style:square}}.markdown-body ol{{list-style:decimal}}.markdown-body ol ol{{list-style:lower-alpha}}.markdown-body ol ol ol{{list-style:lower-roman}}.markdown-body li{{display:list-item;margin:.25em 0}}</style>
+<style>textarea {{ resize: none; }} body, html {{ {'background: #0d1117; color: #e6edf3' if darkmode else ''} }}
+.btn, input, .select, .textarea, .modal-box {{ {'background: #181C14 !important; color: #e6edf3 !important; border: #3C3D37 1px solid !important' if darkmode else ''} }}
+*::-webkit-scrollbar {{ width: 6px; height: 6px; }} *::-webkit-scrollbar-track {{ background: transparent; }} *::-webkit-scrollbar-thumb {{ background: {'#444' if darkmode else '#888'}; border-radius: 3px; }}
+table tr:first-child {{ background: {'#0d1117' if darkmode else '#e6edf3'} !important; }}
+._k1_viz_Table_row_active_ {{ {'background: #181C14 !important;' if darkmode else ''} }}
+.flex_row {{ display: flex; flex-direction: row; }} @media (max-width: 700px) {{ .flex_row {{ flex-direction: column; }} }}
+</style>"""
 
 @app.route("/", daisyEnv=True, guard=tokenGuard)
 def index(guardRes):
-    pre = init._jsDAuto(); user = db["users"][guardRes['userId']]
+    pre = init._jsDAuto(); user = db["users"][guardRes['userId']]; iconF = "#e6edf3" if guardRes["darkmode"] else "#333"
     sel = ["null", *db.query("select handle from channels") | cut(0)] | insId() | ~apply(lambda i, x: f"<option value='{x}' {'selected' if i == 0 else ''}>{x}</option>") | join("")
-    recents = db.query("select v.id, v.vidId, v.duration, a.chatId, v.vidTime, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where a.chatId is not null and a.archived = 0 order by a.chatId desc limit 300")\
-        | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "duration", "chatId", "vidTime", "handle", "title"], onclickFName="vid_select", selectable=True, height=400)) | op().interface() | toHtml()
+    errors = db.query("select v.id, v.vidId, a.chatId, v.duration, v.vidTime, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where (v.vidErr is not null and v.vidErr != '') or (v.transErr is not null and v.transErr != '')")
+    recents = [*errors, *db.query("select v.id, v.vidId, a.chatId, v.duration, v.vidTime, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where a.chatId is not null and a.archived = 0 order by a.chatId desc limit 300")]\
+        | apply(tryout() | toIso() | op().replace(*"T "), 4) | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "chatId", "duration", "vidTime", "handle", "title"], onclickFName="vid_select", ondeleteFName="vid_delete", selectable=True, sortF=True, height=400)) | op().interface() | toHtml()
     return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
+{preamble(guardRes["darkmode"])}
 <div id="main" style="display: flex; flex-direction: column">
-    <div style="display: flex; flex-direction: row">
+    {fragment_channels(user, guardRes)}
+    <div class="flex_row" style="gap: 12px">
         <div style="flex: 1; overflow-x: auto">
-            <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px">
+            <div style="display: flex; flex-direction: row; align-items: center; flex-wrap: wrap; margin-bottom: 24px; padding-top: 12px">
                 <h2>Videos</h2>
                 <input id="{pre}_url" class="input input-bordered" placeholder="(video url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
-                <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button>
-                <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search()}</button>
+                <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add(fill=iconF)}</button>
+                <button class="btn btn-outline" style="padding: 8px; margin-right: 12px; display: block" onclick="window.open('{aiServer}/schedule/{user.scheduleId}/search', '_blank');" title="Go to schedule search page">{k1.Icon.search(fill=iconF)}</button>
+                <div style="display: flex; flex-direction: row; align-items: center; gap: 8px"><div>Channel</div>
+                    <select id="channel_sel" class="select input-bordered" style="width: 100px">{sel}</select></div>
             </div>
-            <div style="display: flex; flex-direction: row; align-items: center; gap: 8px"><div>Channel</div>
-                <select id="{pre}_sel" class="select input-bordered" style="width: fit-content">{sel}</select></div>
-            <div id="{pre}_table" style="overflow-x: auto; width: 100%"></div>
+            <div id="{pre}_table" style="overflow-x: auto; width: 100%; padding-top: 4px"></div>
         </div>
         <div style="flex: 1; overflow-x: auto; display: flex; flex-direction: column">
             <div style="flex: 1"></div><h2>Recents</h2>{recents}</div>
     </div>
     <div id="{pre}_res"></div></div>
-    {fragment_channels(user, guardRes)}
 <script>
-    function vid_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
+    function vid_select(row, i, e) {{
+        if ((e.metaKey || e.ctrlKey || document.body.clientWidth < 700) && typeof(row[2]) == 'number') window.open(`{aiServer}/schedules/{user.scheduleId}/${{row[2]}}`);
+        else dynamicLoad("#{pre}_res", `/mfragment/vid/${{row[0]}}?token={guardRes['token']}`); }}
+    async function vid_delete(row, i, e) {{ await wrapToastReq(fetch(`/api/vid/${{row[0]}}/delete?token={guardRes['token']}`)); }}
     async function {pre}_new() {{ await wrapToastReq(fetchPost("/api/vid/new?token={guardRes['token']}", {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}
-    {pre}_sel.oninput = () => {{ dynamicLoad("#{pre}_table", `/fragment/vids/${{{pre}_sel.value}}?token={guardRes['token']}`); }}; {pre}_sel.oninput();
+    channel_sel.oninput = () => {{ dynamicLoad("#{pre}_table", `/fragment/vids/${{channel_sel.value}}?token={guardRes['token']}`); }}; channel_sel.oninput();
 </script>"""
 
 @app.route("/fragment/vids/<handle>", guard=tokenGuard)
 def fragment_vids(handle, guardRes):
     clause = "and c.handle is null" if handle == "null" else f"and c.handle = '{handle}'"; user = db["users"][guardRes['userId']]
-    return db.query(f"select v.id, v.vidId, v.vidErr, v.transErr, v.duration, a.chatId, v.cleaned, a.archived, c.handle, v.vidTime, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where userId = ? {clause} order by a.chatId desc", user.id) | ~apply(lambda i,vi,ve,te,dur,cId,cls,ar,ha,vt,ti: [i,vi,
+    ui1 = db.query(f"select v.id, v.vidId, a.chatId, v.vidErr, v.transErr, v.duration, v.cleaned, a.archived, c.handle, v.vidTime, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where userId = ? {clause} order by a.chatId desc", user.id) | ~apply(lambda i,vi,cId,ve,te,dur,cls,ar,ha,vt,ti: [i,vi,
+            'none' if cId is None else ('error' if isinstance(cId, str) else cId),
             'none' if ve is None else ('error' if ve else 'yes'),
             'none' if te is None else ('error' if te else 'yes'),dur,
-            'none' if cId is None else ('error' if isinstance(cId, str) else cId),cls,ar,ha,vt | (tryout() | toIso() | op().replace(*"T ")),ti])\
+            cls,ar,ha,vt | (tryout() | toIso() | op().replace(*"T ")),ti])\
         | deref() | (toJsFunc("term", ("archived", ["true", "false", "both"], "false")) | grep("${term}") | filt("x if archived == 'true' else ((not x) if archived == 'false' else true)", 7)\
-            | (shape(0) | aS('f"#rows: {x}"')) & viz.Table(["id", "vidId", "hasVid", "hasTrans", "duration", "chatId", "cleaned", "archived", "handle", "vidTime", "title"], onclickFName=f"vid_select", selectable=True, height=400)) | op().interface() | toHtml()
-
-import secrets, string
-def getYtVidId(url): vidId = url.split("/watch")[-1].strip("?").split("&")[0]; return parse_qs(urlparse(url).query).get("v", [None])[0]
-@app.route("/api/vid/new", methods=["POST"], guard=tokenGuard)
-def api_vid_new(js, guardRes):
-    url = js["url"]; provider = None; userId = guardRes["userId"]; vidId = None
-    if url.startswith("https://www.youtube.com/watch"):       provider = "yt"; vidId = getYtVidId(url)
-    elif url.startswith("https://www.dailymotion.com/video"): provider = "dailymotion"; vidId = url.split("/video/")[1].split("/")[0].split("?")[0].split("&")[0].strip()
-    elif url.startswith("fs:"):
-        fullFn = url.split("fs:")[1]; fn = fullFn.split("/")[-1]; vidId = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12)); provider = "fs"
-        db["videos"].insert(url=fullFn, vidId=vidId, title=fn, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider="fs", retain=0, cleaned=0)
-    if vidId is None: web.toast_error("Can't extract vidId")
-    if provider is None: web.toast_error("Don't know what service (youtube, dailymotion, etc) this url belongs to")
-    vid = db["videos"].lookup(vidId=vidId, provider=provider)
-    if vid:
-        hasAccess = db["access"].lookup(vidId=vid.id, userId=userId)
-        if hasAccess: web.toast_error("Video added before!")
-        else: db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
-    vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
-    db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
+            | (shape(0) | aS('f"#rows: {x}"')) & viz.Table(["id", "vidId", "chatId", "hasVid", "hasTrans", "duration", "cleaned", "archived", "handle", "vidTime", "title"], onclickFName=f"vid_select", selectable=True, ondeleteFName="vid_delete", sortF=True, height=400)) | op().interface() | toHtml()
+    return ui1.replace("<select id=", "<select class='select' id=")
 
 def fragment_channels(user, guardRes):
-    pre = init._jsDAuto()
+    pre = init._jsDAuto(); iconF = "#e6edf3" if guardRes["darkmode"] else "#333"
     d1, d2, d3 = db.query("select c.id, sum(a.archived), sum(coalesce(a.chatId, 0) > 0), count(a.id) from access a join videos v on a.vidId = v.id join channels c on v.channelId = c.id group by c.id") | ~apply(lambda a,b,c,d: [[a,b], [a,c], [a,d]]) | T() | toDict().all()
     ui1 = db.query(f"select id, provider, handle, fullscanErr, id, id, id from channels") | lookup(d1, 4, fill="(no data)") | lookup(d2, 5, fill="(no data)") | lookup(d3, 6, fill="(no data)") | apply(lambda arr: [*arr, round(arr[4]/arr[5]*100) if not isinstance(arr[5], str) and arr[5] > 0 else -1]) | apply(lambda x: 'null' if x is None else ("yes" if x == "" else "error"), 3) | deref()\
         | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle", "fullscanErr", "archived", "ready", "total", "%read"], height=400, onclickFName=f"{pre}_select", selectable=True, sortF=True)) | op().interface() | toHtml(); return f"""
-<div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px; margin-top: 12px">
-    <h2>Channels</h2>
-    <input id="{pre}_url" class="input input-bordered" placeholder="(channel url)" style="margin-left: 24px; margin-right: 8px" autofocus onkeydown="if(event.key == 'Enter') {pre}_new();" />
-    <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add()}</button></div>
-<div style="overflow-x: auto; width: 100%">{ui1}</div><div id="{pre}_res"></div></div>
-<script>function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/fragment/channel/${{row[0]}}?token={guardRes['token']}`); }}
+<div class="flex_row" style="gap: 12px">
+    <div style="flex: 1; overflow-x: auto">
+        <div style="display: flex; flex-direction: row; align-items: center; margin-bottom: 24px; margin-top: 12px">
+            <h2>Channels</h2>
+            <input id="{pre}_url" class="input input-bordered" placeholder="(channel url)" style="margin-left: 24px; margin-right: 8px" onkeydown="if(event.key == 'Enter') {pre}_new();" />
+            <button class="btn btn-outline" style="padding: 8px; margin-right: 4px; display: block" onclick="{pre}_new()">{k1.Icon.add(fill=iconF)}</button></div>
+        <div style="overflow-x: auto; width: 100%">{ui1}</div></div>
+    <div id="{pre}_res" style="flex: 1; overflow-x: auto; padding-top: 4px"></div></div>
+<script>function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/fragment/channel/${{row[0]}}?token={guardRes['token']}`); channel_sel.value = row[2]; channel_sel.oninput(); }}
 async function {pre}_new() {{ await wrapToastReq(fetchPost(`/api/channel/new?token={guardRes['token']}`, {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}</script>"""
 
 @app.route("/api/channel/new", methods=["POST"], guard=tokenGuard)
@@ -91,7 +97,7 @@ def fragment_channel(channelId, guardRes): pre = init._jsDAuto(); channel = db["
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan?token={guardRes['token']}`))"    title="Scan for all videos on the channel, and add each video to the system">Full scan</button>
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/partialScan?token={guardRes['token']}`))" title="Scan till there's a farmiliar video, then stop">Partial scan</button>
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/clearError?token={guardRes['token']}`))">Clear error</button></div>
-<textarea id="{pre}_err" style="height: 400px; width: 100%; margin-top: 12px"></textarea><script>{pre}_err.value = {json.dumps(channel.fullscanErr)}</script>"""
+<textarea id="{pre}_err" class="textarea" style="height: 400px; width: 100%; margin-top: 12px; {'' if guardRes['darkmode'] else 'border: #ddd 1px solid;'}"></textarea><script>{pre}_err.value = {json.dumps(channel.fullscanErr)}</script>"""
 
 @app.route("/api/channel/<int:channelId>/clearError", guard=tokenGuard)
 def api_channel_clearError(channelId): db["channels"][channelId].fullscanErr = None; return "ok"
@@ -101,14 +107,22 @@ def raw_vid(vidId):
     vid = db["videos"][vidId]
     with open(f"vids/{vid.vidId}", "rb") as f: return f.read()
 
-@app.route("/api/vid/<vidId>/transcript", guard=vidGuard)
-@app.route("/api/vid/<vidId>/transcript/<format>", guard=vidGuard)
+@app.route("/api/vid/<vidId>/transcript")
+@app.route("/api/vid/<vidId>/transcript/<format>")
 def api_vid_transcript(vidId, format="text"):
-    vid = db["videos"].lookup(vidId=vidId)
+    vid = db["videos"].lookup(vidId=vidId); postamble = "[Transcript over. If you see there are no content, there literally is no content, may be because it's just music or a silent video!]\n"
     if vid is None: web.notFound()
     if vid.transErr != "": web.notFound()
-    if format == "vtt": return vid.trans
-    return vid.trans.split("\n") | ~head(3) | batched(3) | item().all() | join("\n")
+    if format == "vtt": return vid.trans + postamble
+    return vid.trans.split("\n") | ~head(3) | batched(3) | item().all() | join("\n") + postamble
+
+@app.route("/api/vid/<int:vidId>/delete", guard=vidGuard)
+def api_vid_delete(vidId):
+    vid = db["videos"][vidId]; chatIds = db.query(f"select chatId from access where vidId = {vidId} and chatId is not null") | cut(0) | aS(list)
+    if len(chatIds): res = sendAiServer(1, {"cmd": "deleteChat", "chatIds": chatIds}) # deletes old chat from ai server, to prevent clogging things up
+    db.query(f"delete from access where vidId = {vidId}") # delete from access
+    None | cmd(f"rm vids/{vid.vidId}") | ignore() # delete from fs
+    del db["videos"][vidId]; return "ok" # delete from videos
 
 @app.route("/api/vids/recents", guard=tokenGuard)
 def api_vids_recents(): return db.query("select vidId, title, duration from videos where transErr = '' order by id desc") | ~apply(lambda i,t,d: {"vidId": i, "title": t, "duration": d}) | aS(list) | aS(json.dumps)
