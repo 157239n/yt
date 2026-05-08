@@ -20,8 +20,12 @@ table tr:first-child {{ background: {'#0d1117' if darkmode else '#e6edf3'} !impo
 def index(guardRes):
     pre = init._jsDAuto(); user = db["users"][guardRes['userId']]; iconF = "#e6edf3" if guardRes["darkmode"] else "#333"
     sel = ["null", *db.query("select handle from channels") | cut(0)] | insId() | ~apply(lambda i, x: f"<option value='{x}' {'selected' if i == 0 else ''}>{x}</option>") | join("")
-    errors = db.query("select v.id, v.vidId, a.chatId, v.duration, v.vidTime, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where (v.vidErr is not null and v.vidErr != '') or (v.transErr is not null and v.transErr != '')")
-    recents = [*errors, *db.query("select v.id, v.vidId, a.chatId, v.duration, v.vidTime, c.handle, v.title from videos v join access a on v.id = a.vidId left join channels c on v.channelId = c.id where a.chatId is not null and a.archived = 0 order by a.chatId desc limit 300")]\
+    errors = db.query("""select v.id, v.vidId, a.chatId, v.duration, v.vidTime, c.handle, v.title from videos v
+                              join access a on v.id = a.vidId left join channels c on v.channelId = c.id
+                              where ((v.vidErr is not null and v.vidErr != '') or (v.transErr is not null and v.transErr != '') or typeof(v.duration) = 'text') and a.userId = ?""", user.id)
+    recents = [*errors, *db.query("""select v.id, v.vidId, a.chatId, v.duration, v.vidTime, c.handle, v.title from videos v
+                                        join access a on v.id = a.vidId left join channels c on v.channelId = c.id
+                                        where a.chatId is not null and a.archived = 0 and a.userId = ? order by a.chatId desc limit 300""", user.id)]\
         | apply(tryout() | toIso() | op().replace(*"T "), 4) | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "vidId", "chatId", "duration", "vidTime", "handle", "title"], onclickFName="vid_select", ondeleteFName="vid_delete", selectable=True, sortF=True, height=400)) | op().interface() | toHtml()
     return f"""<style>#main {{ flex-direction: column-reverse; }} @media (min-width: 600px) {{ #main {{ flex-direction: row; }} }}</style><title>Local youtube service</title>
 {preamble(guardRes["darkmode"])}
@@ -65,9 +69,13 @@ def fragment_vids(handle, guardRes):
     return ui1.replace("<select id=", "<select class='select' id=")
 
 def fragment_channels(user, guardRes):
-    pre = init._jsDAuto(); iconF = "#e6edf3" if guardRes["darkmode"] else "#333"
-    d1, d2, d3 = db.query("select c.id, sum(a.archived), sum(coalesce(a.chatId, 0) > 0), count(a.id) from access a join videos v on a.vidId = v.id join channels c on v.channelId = c.id group by c.id") | ~apply(lambda a,b,c,d: [[a,b], [a,c], [a,d]]) | T() | toDict().all()
-    ui1 = db.query(f"select id, provider, handle, fullscanErr, id, id, id from channels") | lookup(d1, 4, fill="(no data)") | lookup(d2, 5, fill="(no data)") | lookup(d3, 6, fill="(no data)") | apply(lambda arr: [*arr, round(arr[4]/arr[5]*100) if not isinstance(arr[5], str) and arr[5] > 0 else -1]) | apply(lambda x: 'null' if x is None else ("yes" if x == "" else "error"), 3) | deref()\
+    pre = init._jsDAuto(); iconF = "#e6edf3" if guardRes["darkmode"] else "#333"; user = db["users"][guardRes["userId"]]
+    res = db.query("""select c.id, sum(a.archived), sum(coalesce(a.chatId, 0) > 0), count(a.id) from access a
+                                  join videos v on a.vidId = v.id join channels c on v.channelId = c.id
+                                  where a.userId = ? group by c.id""", user.id) | ~apply(lambda a,b,c,d: [[a,b], [a,c], [a,d]]) | T() | toDict().all() | aS(list)
+    d1, d2, d3 = res if len(res) else [{}, {}, {}]
+    ui1 = db.query(f"select c.id, c.provider, c.handle, c.fullscanErr, c.id, c.id, c.id from channels c join subs s on c.id = s.channelId where s.userId = ?", user.id)\
+        | lookup(d1, 4, fill="(no data)") | lookup(d2, 5, fill="(no data)") | lookup(d3, 6, fill="(no data)") | apply(lambda arr: [*arr, round(arr[4]/arr[5]*100) if not isinstance(arr[5], str) and arr[5] > 0 else -1]) | apply(lambda x: 'null' if x is None else ("yes" if x == "" else "error"), 3) | deref()\
         | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "provider", "handle", "fullscanErr", "archived", "ready", "total", "%read"], height=400, onclickFName=f"{pre}_select", selectable=True, sortF=True)) | op().interface() | toHtml(); return f"""
 <div class="flex_row" style="gap: 12px">
     <div style="flex: 1; overflow-x: auto">
@@ -88,14 +96,17 @@ def api_channel_new(js, guardRes):
         else: web.toast_error(f"Invalid youtube channel link")
     if handle is None: web.toast_error("Provider not found")
     channel = db["channels"].lookup(handle=handle)
-    if channel: web.toast_error("Channel added before!")
-    db["channels"].insert(provider="yt", handle=handle, name=""); return "ok"
+    if channel is None: channel = db["channels"].insert(provider="yt", handle=handle, name="", partscanTime=0)
+    sub = db["subs"].lookup(channelId=channel.id, userId=userId)
+    if sub: web.toast_error("Channel added before!")
+    db["subs"].insert(channelId=channel.id, userId=userId); return "ok"
 
 @app.route("/fragment/channel/<int:channelId>", guard=tokenGuard)
 def fragment_channel(channelId, guardRes): pre = init._jsDAuto(); channel = db["channels"][channelId]; return f"""<h3>Channel {channel.handle}</h3>
 <div style="display: flex; flex-direction: row; gap: 8px">
-    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan?token={guardRes['token']}`))"    title="Scan for all videos on the channel, and add each video to the system">Full scan</button>
-    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/partialScan?token={guardRes['token']}`))" title="Scan till there's a farmiliar video, then stop">Partial scan</button>
+    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/0?token={guardRes['token']}`))"  title="Scan first page only">Partial scan</button>
+    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/20?token={guardRes['token']}`))" title="Scans 20 scrolls, about 630 videos">Full scan</button>
+    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/100?token={guardRes['token']}`))" title="Scans 100 scrolls, about 3k videos">Fucking deep scan</button>
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/clearError?token={guardRes['token']}`))">Clear error</button></div>
 <textarea id="{pre}_err" class="textarea" style="height: 400px; width: 100%; margin-top: 12px; {'' if guardRes['darkmode'] else 'border: #ddd 1px solid;'}"></textarea><script>{pre}_err.value = {json.dumps(channel.fullscanErr)}</script>"""
 
@@ -210,8 +221,12 @@ def metrics():
         s += f'yt_chats_count{{status="{status}"}} {count}\n'
     for userId, archivedTime in db.query("select a.userId, sum(v.duration) from videos v join access a on v.id = a.vidId where a.archived = 1 group by a.userId"):
         s += f'yt_archivedTime_total{{userId="{userId}"}} {archivedTime}\n'
+    for userId, _time in db.query("select a.userId, sum(v.duration) from videos v join access a on v.id = a.vidId group by a.userId"):
+        s += f'yt_time_total{{userId="{userId}"}} {_time}\n'
     for userId, nChats in db.query("select a.userId, count(v.duration) from videos v join access a on v.id = a.vidId where a.archived = 1 group by a.userId"):
         s += f'yt_archivedChats_count{{userId="{userId}"}} {nChats}\n'
+    for userId, nChats in db.query("select a.userId, count(v.duration) from videos v join access a on v.id = a.vidId group by a.userId"):
+        s += f'yt_chats_count{{userId="{userId}"}} {nChats}\n'
     return s
 
 sql.lite_flask(app, guard=adminGuard); k1.logErr.flask(app, guard=adminGuard); k1.cron.flask(app, guard=adminGuard)

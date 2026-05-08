@@ -39,10 +39,18 @@ db.query("CREATE INDEX IF NOT EXISTS access_userId ON access (userId);")
 
 db.query("""CREATE TABLE IF NOT EXISTS channels ( -- tracks youtube channels
     id           INTEGER primary key autoincrement,
-    provider     TEXT,   -- only yt for now
-    handle       TEXT,   -- channel names, starts with @
-    name         TEXT,   -- channel display name
-    fullscanErr  TEXT,   -- if successful, an empty string, if not executed, null, else error
-    fullscanTime INTEGER -- time when finishes last full scan
+    provider     TEXT,    -- only yt for now
+    handle       TEXT,    -- channel names, starts with @
+    name         TEXT,    -- channel display name
+    fullscanErr  TEXT,    -- if successful, an empty string, if not executed, null, else error
+    fullscanTime INTEGER, -- time when finishes last full scan
+    partscanTime INTEGER  -- last partial scan time
 );""")
+
+db.query("""CREATE TABLE IF NOT EXISTS subs ( -- track which user is subscribed to which channel
+    id          INTEGER primary key autoincrement,
+    userId      INTEGER,
+    channelId   INTEGER
+);""")
+
 

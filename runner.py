@@ -39,51 +39,44 @@ def getUrlsFromElems(es):
     print(f"finished, og es: {len(es)}, urls: {len(urls)}"); return urls
 
 def getYtVid(url): return db["videos"].lookup(vidId=getYtVidId(url))
-def ingestUrls(urls, guardRes, channel):
+def ingestUrls(urls, channel): # ingest urls for all users that subscribes to the channel
     print("begin ingestUrls")
+    userIds = db.query("select userId from subs where channelId = ?", channel.id) | cut(0) | aS(list)
     for i, url in enumerate(urls):
         print(f"\ringestUrls: {i}   ", end="")
-        try: api_vid_new({"url": url}, guardRes)
-        except web._ShortCircuit as e: pass
+        for userId in userIds:
+            try: api_vid_new({"url": url}, {"userId": userId})
+            except web._ShortCircuit as e: pass
         vid = getYtVid(url)
         if vid: vid.channelId = channel.id
     print("finished ingestUrls")
 
 @app.route("/api/channel/<int:channelId>/fullScan", guard=tokenGuard)
-def api_channel_fullScan(channelId, guardRes):
+@app.route("/api/channel/<int:channelId>/fullScan/<int:nScrolls>", guard=tokenGuard)
+def api_channel_fullScan(channelId, nScrolls=20):
     channel = db["channels"][channelId]; print(f"fullScan init, channel: {channelId}")
     with zircon.newBrowser() as b:
-        b.pickExtFromGroup("sess"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(1)
+        b.pickExtFromGroup("yt"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(1)
         main = b.querySelector("div:has(ytd-rich-item-renderer)"); oldHeight = 0
-        for i in range(20):
+        for i in range(nScrolls):
             print(f"fullScan {i}, {oldHeight}"); newHeight = main.clientHeight
             if oldHeight == newHeight: break
             k1.resolve(b._sendExt({"cmd": "scrollAt", "x": 500, "y": 500, "deltaY": 100000})); time.sleep(1)
-        ingestUrls(getUrlsFromElems(b.querySelectorAll("ytd-rich-item-renderer")), guardRes, channel)
+        ingestUrls(getUrlsFromElems(b.querySelectorAll("ytd-rich-item-renderer")), channel)
     return "ok"
-def partialScan(b, handle):
-    b.goto(f"https://www.youtube.com/{handle}/videos"); time.sleep(1)
-    main = b.querySelector("div:has(ytd-rich-item-renderer)"); oldHeight = 0; urls = []
-    for i in range(20):
-        newUrls = getUrls(main.innerHTML)
-        for url in newUrls:
-            if getYtVid(url): return urls
-            urls.append(url)
-        newHeight = main.clientHeight
-        if oldHeight == newHeight: break
-        k1.resolve(b._sendExt({"cmd": "scrollAt", "x": 500, "y": 500, "deltaY": 100000}))
-    return urls
-@app.route("/api/channel/<int:channelId>/partialScan", guard=tokenGuard)
-def api_channel_partialScan(channelId, guardRes):
-    channel = db["channels"][channelId]
-    with zircon.newBrowser() as b: b.pickExtFromGroup("yttri"); ingestUrls(partialScan(b, channel.handle), guardRes, channel)
-    return "ok"
+
+@k1.cron(delay=1)
+def channel_partscan_loop():
+    for channel in db["channels"].select(f"where partscanTime < {int(time.time()) - 86400} limit 1"):
+        try: api_channel_fullScan(channel.id, 0)
+        except Exception as e: print(f"{type(e)} | {e}\n{traceback.format_exc()}")
+        channel.partscanTime = int(time.time())
 
 @k1.cron(delay=1)
 def channel_fullscan_loop():
     print("fullscan loop")
     for channel in db["channels"].select("where fullscanErr is null limit 1"):
-        try: api_channel_fullScan(channel.id, {"userId": 1}); channel.fullscanErr = ""; channel.fullscanTime = int(time.time())
+        try: api_channel_fullScan(channel.id, 20); channel.fullscanErr = ""; channel.fullscanTime = int(time.time())
         except Exception as e: channel.fullscanErr = f"{type(e)} | {e}\n{traceback.format_exc()}"
 
 @k1.cron(delay=60)
@@ -94,9 +87,9 @@ def archivedSyncLoop():
 
 providers = {"yt": "https://www.youtube.com/watch?v=", "dailymotion": "https://www.dailymotion.com/video/"}
 
-@k1.cron(delay=10)
+@k1.cron(delay=1)
 def titleLoop():
-    for vid in db["videos"].select("where title is null"):
+    for vid in db["videos"].select("where vidId = '' and title is null limit 1"):
         if vid.provider in providers:
             res = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" {providers[vid.provider]}{vid.vidId}', mode=0) | apply(join("\n")) | deref()
             vid.title = res[0] if res[0].strip() else res | join("\n")
@@ -136,16 +129,12 @@ def matroskaLoop(): # detects videos that are of matroska format, and reformat i
         if len(fns) == 0: vid.mime = "video/x-matroska-error"; print(f"matroska error: {res}"); continue
         None | cmd(f"mv {fns[0]} vids/{vid.vidId}") | ignore(); vid.mime = "video/webm"
 
-# @k1.cron(delay=10)
-def zeroLoop(): # detects videos where vidErr is '' (success), but video file does not exist
-    for vid in db["videos"].select("where vidErr=''"):
-        if not os.path.exists(f"vids/{vid.vidId}"): vid.vidErr = None
-
 @k1.cron(delay=10)
 def durationLoop():
     for vid in db["videos"].select("where vidErr='' and duration is null"):
         print(f"duration: {vid.id}")
-        vid.duration = None | cmd(f"ffprobe -v error -show_entries format=duration -of default=nw=1 -i vids/{vid.vidId}") | join("") | op().strip().replace("duration=", "") | aS(float)
+        try: vid.duration = None | cmd(f"ffprobe -v error -show_entries format=duration -of default=nw=1 -i vids/{vid.vidId}") | join("") | op().strip().replace("duration=", "") | aS(float)
+        except Exception as e: vid.duration = f"{type(e)} | {e}\n{traceback.format_exc()}"
 
 from faster_whisper import WhisperModel, BatchedInferencePipeline; model = BatchedInferencePipeline(model=WhisperModel("large-v3-turbo", device="cuda", compute_type="int8_float16"))
 # gpu: device="cuda", compute_type="int8_float16"
@@ -166,17 +155,17 @@ def transLoop():
 @k1.cron(delay=1)
 def summarizeLoop():
     # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
-    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and v.duration is not null and a.chatId is null order by a.id limit 1"):
+    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and v.duration is not null and typeof(v.duration) = 'real' and a.chatId is null order by a.id limit 1"):
         access = db["access"][accessId]
         try:
             vid = db["videos"][vidId]; user = db["users"][access.userId]; channel = db["channels"][vid.channelId]; print(f"summarize: {vid.id}"); channelS = f", from channel '{channel.handle}'" if channel else ""
-            res = sendAiServer(user.id, {"cmd": "scheduleNewChat", "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}{channelS}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
+            res = sendAiServer(user.id, {"cmd": "scheduleNewChat", "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}s{channelS}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
             access.chatId = int(res.text.strip())
         except Exception as e: access.chatId = f"error: {res.text.strip()}"
 
 @k1.cron(delay=10)
 def cleanLoop():
     now = int(time.time())
-    for vid in db["videos"].select(f"where vidErr = '' and transErr = '' and createdTime < {now - 86400} and retain = 0 and cleaned = 0 limit 1"):
+    for vid in db["videos"].select(f"where vidErr = '' and transErr = '' and vidTime < {now - 86400} and retain = 0 and cleaned = 0 limit 1"):
         None | cmd(f'rm vids/{vid.vidId}') | ignore(); vid.cleaned = 1
 
