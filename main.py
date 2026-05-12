@@ -250,7 +250,7 @@ def api_vid_clear(vidId, resource, guardRes):
 def ytTranscript(vidId:str, env) -> str:
     """Get transcript of specific youtube video"""
     yield {"type": "status", "content": "Fetching transcript"}
-    return api_vid_transcript(vidId, "vtt")
+    return {"resultType": "str", "result": api_vid_transcript(vidId, "vtt"), "func": "def func(): changeModel('smart')"}
 
 toolsD = {"ytTranscript": ytTranscript}
 
