@@ -5,22 +5,22 @@ __all__ = []
 import secrets, string
 def getYtVidId(url): vidId = url.split("/watch")[-1].strip("?").split("&")[0]; return parse_qs(urlparse(url).query).get("v", [None])[0]
 @app.route("/api/vid/new", methods=["POST"], guard=tokenGuard)
-def api_vid_new(js, guardRes):
-    url = js["url"]; provider = None; userId = guardRes["userId"]; vidId = None
+def api_vid_new(js, guardRes, opts=None):
+    url = js["url"]; provider = None; userId = guardRes["userId"]; vidId = None; opts = opts or {}
     if url.startswith("https://www.youtube.com/watch"):       provider = "yt"; vidId = getYtVidId(url)
     elif url.startswith("https://www.dailymotion.com/video"): provider = "dailymotion"; vidId = url.split("/video/")[1].split("/")[0].split("?")[0].split("&")[0].strip()
     elif url.startswith("fs:"):
         fullFn = url.split("fs:")[1]; fn = fullFn.split("/")[-1]; vidId = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12)); provider = "fs"
-        db["videos"].insert(url=fullFn, vidId=vidId, title=fn, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider="fs", retain=0, cleaned=0)
+        db["videos"].insert(url=fullFn, vidId=vidId, title=fn, vidErr=None, trans="", transErr=opts.get("transErr", None), createdTime=int(time.time()), provider="fs", retain=0, cleaned=0, soundErr=opts.get("soundErr", 0), deleted=0)
     if vidId is None: web.toast_error("Can't extract vidId")
     if provider is None: web.toast_error("Don't know what service (youtube, dailymotion, etc) this url belongs to")
     vid = db["videos"].lookup(vidId=vidId, provider=provider)
     if vid:
         hasAccess = db["access"].lookup(vidId=vid.id, userId=userId)
-        if hasAccess: web.toast_error("Video added before!")
-        else: db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
-    vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=None, createdTime=int(time.time()), provider=provider, retain=0, cleaned=0)
-    db["access"].insert(vidId=vid.id, userId=userId, chatId=None, archived=0); return "ok"
+        if hasAccess: return f"{vid.id}"
+        else: db["access"].insert(vidId=vid.id, userId=userId, chatId=opts.get("chatId", None), archived=0); return f"{vid.id}"
+    vid = db["videos"].insert(url=url, vidId=vidId, title=None, vidErr=None, trans="", transErr=opts.get("transErr", None), createdTime=int(time.time()), provider=provider, retain=0, cleaned=0, soundErr=opts.get("soundErr", 0), deleted=0)
+    db["access"].insert(vidId=vid.id, userId=userId, chatId=opts.get("chatId", None), archived=0); return f"{vid.id}"
 
 import bs4
 def getUrls(htm):
@@ -53,16 +53,24 @@ def ingestUrls(urls, channel): # ingest urls for all users that subscribes to th
 
 @app.route("/api/channel/<int:channelId>/fullScan", guard=tokenGuard)
 @app.route("/api/channel/<int:channelId>/fullScan/<int:nScrolls>", guard=tokenGuard)
+def api_channel_fullScan_ext(channelId, nScrolls=20): threading.Thread(target=api_channel_fullScan, args=(channelId, nScrolls)).start(); return "ok"
+
 def api_channel_fullScan(channelId, nScrolls=20):
     channel = db["channels"][channelId]; print(f"fullScan init, channel: {channelId}")
     with zircon.newBrowser() as b:
-        b.pickExtFromGroup("yt"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(1)
+        b.pickExtFromGroup("yt"); b.goto(f"https://www.youtube.com/{channel.handle}/videos"); time.sleep(2)
         main = b.querySelector("div:has(ytd-rich-item-renderer)"); oldHeight = 0
-        for i in range(nScrolls):
-            print(f"fullScan {i}, {oldHeight}"); newHeight = main.clientHeight
-            if oldHeight == newHeight: break
-            k1.resolve(b._sendExt({"cmd": "scrollAt", "x": 500, "y": 500, "deltaY": 100000})); time.sleep(1)
-        ingestUrls(getUrlsFromElems(b.querySelectorAll("ytd-rich-item-renderer")), channel)
+        try:
+            for i in range(nScrolls):
+                print(f"fullScan scroll {i}, height {oldHeight}")
+                newHeight = main.clientHeight
+                if oldHeight == newHeight: break
+                oldHeight = newHeight; k1.resolve(b._sendExt({"cmd": "scrollAt", "x": 500, "y": 500, "deltaY": 100000})); time.sleep(1)
+        except Exception as e: print(f"error: {type(e)}"); time.sleep(5)
+        with k1.timer() as t:
+            try: ingestUrls(getUrlsFromElems(b.querySelectorAll("ytd-rich-item-renderer", timeout=15, clientTimeout=35)), channel)
+            except Exception as e: print(f"{type(e)} | {e}\n{traceback.format_exc()}")
+        print(f"scrape time: {t():.3f}s")
     return "ok"
 
 @k1.cron(delay=1)
@@ -74,7 +82,6 @@ def channel_partscan_loop():
 
 @k1.cron(delay=1)
 def channel_fullscan_loop():
-    print("fullscan loop")
     for channel in db["channels"].select("where fullscanErr is null limit 1"):
         try: api_channel_fullScan(channel.id, 20); channel.fullscanErr = ""; channel.fullscanTime = int(time.time())
         except Exception as e: channel.fullscanErr = f"{type(e)} | {e}\n{traceback.format_exc()}"
@@ -89,19 +96,21 @@ providers = {"yt": "https://www.youtube.com/watch?v=", "dailymotion": "https://w
 
 @k1.cron(delay=1)
 def titleLoop():
-    for vid in db["videos"].select("where vidId = '' and title is null limit 1"):
-        if vid.provider in providers:
-            res = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" {providers[vid.provider]}{vid.vidId}', mode=0) | apply(join("\n")) | deref()
-            vid.title = res[0] if res[0].strip() else res | join("\n")
-        else: vid.title = f"Unknown provider {vid.provider}"; continue
+    vidIds = db.query("select id from videos where vidErr = '' and title is null limit 1") | cut(0) | aS(list)
+    if len(vidIds) == 0: return
+    vid = db["videos"][vidIds[0]]
+    if vid.provider in providers:
+        res = None | cmd(f'{yt_dlp} --cookies cookies.txt --print "%(title)s" {providers[vid.provider]}{vid.vidId}', mode=0) | apply(join("\n")) | deref()
+        vid.title = res[0] if res[0].strip() else res | join("\n")
+    else: vid.title = f"Unknown provider {vid.provider}"
 
 import shlex
 @k1.cron(delay=60)
 def vidLoop(): # auto detects videos that need to be taken care of
-    common = "vidErr is null and title is not null"; channelIds = db.query(f"select distinct channelId from videos where {common} order by channelId") | cut(0) | aS(list) # grab unique channels that has undownloaded videos
+    channelIds = db.query(f"select distinct channelId from videos where vidErr is null order by channelId") | cut(0) | aS(list) # grab unique channels that has undownloaded videos
     if len(channelIds) == 0: return
-    if channelIds[0] is None: vidId = db.query(f"select id from videos where {common} and channelId is null order by id desc limit 1")[0][0] # looks for videos not in any channel first
-    else: vidId = db.query(f"select id from videos where {common} and channelId = ? order by id desc limit 1", channelIds | randomize(None) | item())[0][0] # then pick a random channel and do its latest video first
+    if channelIds[0] is None: vidId = db.query(f"select id from videos where vidErr is null and channelId is null order by id desc limit 1")[0][0] # looks for videos not in any channel first
+    else: vidId = db.query(f"select id from videos where vidErr is null and channelId = ? order by id desc limit 1", channelIds | randomize(None) | item())[0][0] # then pick a random channel and do its latest video first
     vid = db["videos"][vidId]; print(f"vid: {vid.id}, provider: {vid.provider}")
     if vid.provider in providers:
         res = None | cmd(f'{yt_dlp} --cookies cookies.txt -o "tmpVids/new.%(ext)s" {providers[vid.provider]}{vid.vidId}', mode=0) | deref()
@@ -155,11 +164,11 @@ def transLoop():
 @k1.cron(delay=1)
 def summarizeLoop():
     # if len(db.query("select id from videos where vidErr = '' and transErr is null")) > 0: print("skipping summarize loop"); return # when there's stuff to transcribe, it consumes the gpu, which means text generation is going to be slow, so pause summarization if there's transcription going on
-    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and v.duration is not null and typeof(v.duration) = 'real' and a.chatId is null order by a.id limit 1"):
+    for accessId, vidId in db.query("select a.id, v.id from videos v join access a on v.id = a.vidId where v.transErr = '' and v.duration is not null and typeof(v.duration) = 'real' and a.chatId is null and v.title is not null order by a.id limit 1"):
         access = db["access"][accessId]
         try:
             vid = db["videos"][vidId]; user = db["users"][access.userId]; channel = db["channels"][vid.channelId]; print(f"summarize: {vid.id}"); channelS = f", from channel '{channel.handle}'" if channel else ""
-            res = sendAiServer(user.id, {"cmd": "scheduleNewChat", "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}s{channelS}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
+            res = sendAiServer(user.id, {"cmd": "scheduleNewChat", "prompt": f"Please fetch the transcript of youtube video with id '{vid.vidId}' (title '{vid.title}', duration {vid.duration}s{channelS}, url https://www.youtube.com/watch?v={vid.vidId}) and summarize 2 times, once for a 1-2 paragraph  overview, and once in detail. Transcript might have small spelling errors (but not core facts), correct it if necessary"})
             access.chatId = int(res.text.strip())
         except Exception as e: access.chatId = f"error: {res.text.strip()}"
 
@@ -168,4 +177,57 @@ def cleanLoop():
     now = int(time.time())
     for vid in db["videos"].select(f"where vidErr = '' and transErr = '' and vidTime < {now - 86400} and retain = 0 and cleaned = 0 limit 1"):
         None | cmd(f'rm vids/{vid.vidId}') | ignore(); vid.cleaned = 1
+
+
+
+
+
+
+# for playlists
+
+@k1.cron(delay=10)
+def soundLoop(): # converts video to mp3 file
+    for vid in db["videos"].select("where vidErr = '' and soundErr is null limit 1"):
+        print(f"sound: {vid.id}")
+        res = None | cmd(f"ffmpeg -i vids/{vid.vidId} -vn -acodec libmp3lame sounds/{vid.vidId}.mp3", mode=0) | deref()
+        if os.path.exists(f"sounds/{vid.vidId}.mp3"): vid.soundErr = ""
+        else: vid.soundErr = f"error: {res}"
+
+import subprocess
+from pathlib import Path
+@k1.cron(delay=1)
+def canonSoundLoop(): # copies [vidId].mp3 to [title].mp3
+    for vid in db["videos"].select("where soundErr = '' and canonSound is null order by id"):
+        dst = f"canonSounds/{vid.id:07}) " + vid.title.strip().replace("/", "_") + ".mp3"
+        res = subprocess.run(["cp", f"sounds/{vid.vidId}.mp3", dst], capture_output=True, text=True)
+        if os.path.exists(dst): vid.canonSound = ""
+        else: vid.canonSound = f"error: {res.stdout} | {res.stderr} | {res.returncode}"
+
+@k1.cron(delay=10)
+def playlistLoop():
+    res = db.query(f"select id from playlists where lastScan < {int(time.time()) - 86400}")
+    if len(res) == 0: return
+    playlist = db["playlists"][res[0][0]]; print(f"playlist: {playlist.id}"); newVidIds = set()
+    currentVidIds = db.query("select vidId from vid_pl where plId = 1") | cut(0) | aS(list) | aS(set)
+    with zircon.newBrowser() as b:
+        b.pickExtFromGroup("yt"); b.goto(f"https://www.youtube.com/playlist?list={playlist.handle}")
+        playlist.name = b.querySelector("yt-page-header-renderer h1").textContent
+        print(f"Before long scroll: {playlist.name}"); b.longScroll(0, 1000, 1, 300); print("Done long scroll")
+        for i, a in enumerate(b.querySelector("ytd-item-section-renderer").querySelectorAll("ytd-playlist-video-renderer a#video-title")):
+            print(f"\rProcessing playlist {playlist.id} video #{i}   ", end="")
+            try:
+                url = next(bs4.BeautifulSoup(a.outerHTML, "html.parser").children).attrs["href"]; print(f"{url=}")
+                vidId = int(api_vid_new({"url": "https://www.youtube.com" + url}, {"userId": 1}, {"chatId": 0, "soundErr": None, "transErr": ""})); newVidIds.add(vidId)
+                if vidId not in currentVidIds: db["vid_pl"].insert(vidId=vidId, plId=playlist.id)
+            except Exception as e: print(f"{type(e)} | {e}\n{traceback.format_exc()}")
+        playlist.lastScan = int(time.time()); s = list(currentVidIds - newVidIds) | join(","); db.query(f"delete from vid_pl where plId = {playlist.id} and vidId in ({s})") # deleting old songs in touhou eargasm list
+        None | cmd("rm canonSounds/*") | ignore(); db.query("update videos set canonSound = null where id in (select vidId from vid_pl where plId = 1)") # delete all files in canonSounds, then recopy all those files that're still in the playlist
+
+
+
+
+
+
+
+
 

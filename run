@@ -1,6 +1,0 @@
-#!/bin/bash
-
-watchfiles --filter python --sigint-timeout 2 'python main.py'
-
-
-
