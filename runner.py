@@ -224,7 +224,7 @@ def playlistLoop():
             print(f"\rProcessing playlist {playlist.id} video #{i}   ", end="")
             try:
                 url = next(bs4.BeautifulSoup(a.outerHTML, "html.parser").children).attrs["href"]; print(f"{url=}", end="")
-                vidId = int(api_vid_new({"url": "https://www.youtube.com" + url}, {"userId": 1}, {"chatId": 0, "soundErr": None, "transErr": ""})); newVidIds.add(vidId)
+                vidId = int(api_vid_new({"url": "https://www.youtube.com" + url}, {"userId": playlist.userId}, {"chatId": 0, "soundErr": None, "transErr": ""})); newVidIds.add(vidId)
                 if vidId in currentVidIds: db["vid_pl"].lookup(vidId=vidId, plId=playlist.id).idx = i
                 else: db["vid_pl"].insert(vidId=vidId, plId=playlist.id, idx=i)
             except Exception as e: print(f"{type(e)} | {e}\n{traceback.format_exc()}")

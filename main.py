@@ -127,7 +127,7 @@ def api_channel_clearError(channelId): db["channels"][channelId].fullscanErr = N
 
 def fragment_playlists(guardRes):
     pre = init._jsDAuto(); iconF = "#e6edf3" if guardRes["darkmode"] else "#333"; user = db["users"][guardRes["userId"]]
-    ui1 = db.query("select id, name, lastScan, handle from playlists where userId = ?", user.id) | apply(toIso() | op().replace(*"T "), 2) | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "name", "lastScan", "handle"], onclickFName=f"{pre}_select", selectable=True)) | op().interface() | toHtml()
+    ui1 = db.query("select id, name, lastScan, handle from playlists where userId = ?", user.id) | apply(toIso() | op().replace(*"T "), 2) | deref() | (toJsFunc("term") | grep("${term}") | viz.Table(["id", "name", "lastScan", "handle"], onclickFName=f"{pre}_select", selectable=True, height=200)) | op().interface() | toHtml()
     return f"""
 <div class="flex_row" style="gap: 12px">
     <div style="flex: 1; overflow-x: auto">
@@ -145,6 +145,7 @@ def api_playlist_new(js, guardRes):
     user = db["users"][guardRes["userId"]]; url = js["url"]
     if not url.startswith("https://www.youtube.com/playlist?list="): web.toast_error("Invalid playlist url format. Expected to start with 'https://www.youtube.com/playlist?list='")
     handle = url.split("https://www.youtube.com/playlist?list=")[1].split("&")[0]
+    if db["playlists"].lookup(handle=handle, userId=user.id): web.toast_error("Playlist already added!")
     db["playlists"].insert(handle=handle, lastScan=0, userId=user.id); return "ok"
 
 @app.route("/fragment/playlist/<int:playlistId>", guard=tokenGuard)
