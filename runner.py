@@ -194,34 +194,42 @@ def soundLoop(): # converts video to mp3 file
         else: vid.soundErr = f"error: {res}"
 
 import subprocess
-from pathlib import Path
 @k1.cron(delay=1)
-def canonSoundLoop(): # copies [vidId].mp3 to [title].mp3
-    for vid in db["videos"].select("where soundErr = '' and canonSound is null order by id"):
-        dst = f"canonSounds/{vid.id:07}) " + vid.title.strip().replace("/", "_") + ".mp3"
-        res = subprocess.run(["cp", f"sounds/{vid.vidId}.mp3", dst], capture_output=True, text=True)
-        if os.path.exists(dst): vid.canonSound = ""
-        else: vid.canonSound = f"error: {res.stdout} | {res.stderr} | {res.returncode}"
+def playlistCopyLoop(): # copies [vidId].mp3 to [title].mp3 in the correct playlist directory
+    for pl in db["playlists"].select("where compileErr is null"):
+        a, b = db.query("select count(v.id), sum(v.soundErr = '') from vid_pl vp join videos v on vp.vidId = v.id where plId = ?", pl.id)[0]
+        if a != b: continue
+        None | cmd(f"mkdir -p playlists/{pl.id}") | ignore(); None | cmd(f"rm playlists/{pl.id}/*") | ignore()
+        length = db.query("select count(id) from vid_pl where plId = ?", pl.id)[0][0]
+        if length == 0: pl.compileErr = ""; continue
+        ndigits = math.ceil(math.log10(length)+0.00000001)
+        for idx, vidId in db.query("select idx, vidId from vid_pl where plId = ?", pl.id):
+            vid = db["videos"][vidId]; dst = f"playlists/{pl.id}/" + str(idx).zfill(ndigits) + ") " + (vid.title or "(no title)").strip().replace("/", "_") + ".mp3"
+            res = subprocess.run(["cp", f"sounds/{vid.vidId}.mp3", dst], capture_output=True, text=True)
+            if not os.path.exists(dst): print(f"Vid {vidId} of playlist {pl.id} can't be copied over for some reason: {res.stdout} | {res.stderr} | {res.returncode}")
+        pl.compileErr = ""
 
 @k1.cron(delay=10)
 def playlistLoop():
     res = db.query(f"select id from playlists where lastScan < {int(time.time()) - 86400}")
     if len(res) == 0: return
     playlist = db["playlists"][res[0][0]]; print(f"playlist: {playlist.id}"); newVidIds = set()
-    currentVidIds = db.query("select vidId from vid_pl where plId = 1") | cut(0) | aS(list) | aS(set)
+    currentVidIds = db.query("select vidId from vid_pl where plId = ?", playlist.id) | cut(0) | aS(list) | aS(set)
     with zircon.newBrowser() as b:
         b.pickExtFromGroup("yt"); b.goto(f"https://www.youtube.com/playlist?list={playlist.handle}")
-        playlist.name = b.querySelector("yt-page-header-renderer h1").textContent
+        try: playlist.name = b.querySelector("yt-page-header-renderer h1").textContent
+        except Exception as e: playlist.name = "(error)"; print(f"{type(e)} | {e}\n{traceback.format_exc()}")
         print(f"Before long scroll: {playlist.name}"); b.longScroll(0, 1000, 1, 300); print("Done long scroll")
         for i, a in enumerate(b.querySelector("ytd-item-section-renderer").querySelectorAll("ytd-playlist-video-renderer a#video-title")):
             print(f"\rProcessing playlist {playlist.id} video #{i}   ", end="")
             try:
-                url = next(bs4.BeautifulSoup(a.outerHTML, "html.parser").children).attrs["href"]; print(f"{url=}")
+                url = next(bs4.BeautifulSoup(a.outerHTML, "html.parser").children).attrs["href"]; print(f"{url=}", end="")
                 vidId = int(api_vid_new({"url": "https://www.youtube.com" + url}, {"userId": 1}, {"chatId": 0, "soundErr": None, "transErr": ""})); newVidIds.add(vidId)
-                if vidId not in currentVidIds: db["vid_pl"].insert(vidId=vidId, plId=playlist.id)
+                if vidId in currentVidIds: db["vid_pl"].lookup(vidId=vidId, plId=playlist.id).idx = i
+                else: db["vid_pl"].insert(vidId=vidId, plId=playlist.id, idx=i)
             except Exception as e: print(f"{type(e)} | {e}\n{traceback.format_exc()}")
         playlist.lastScan = int(time.time()); s = list(currentVidIds - newVidIds) | join(","); db.query(f"delete from vid_pl where plId = {playlist.id} and vidId in ({s})") # deleting old songs in touhou eargasm list
-        None | cmd("rm canonSounds/*") | ignore(); db.query("update videos set canonSound = null where id in (select vidId from vid_pl where plId = 1)") # delete all files in canonSounds, then recopy all those files that're still in the playlist
+        playlist.compileErr = None
 
 
 

@@ -116,7 +116,7 @@ def fragment_channel(channelId, guardRes): pre = init._jsDAuto(); channel = db["
 <div style="display: flex; flex-direction: row; gap: 8px">
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/0?token={guardRes['token']}`))"  title="Scan first page only, done every midnight">Partial scan</button>
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/20?token={guardRes['token']}`))" title="Scans 20 scrolls, about 630 videos, done first time channel added">Full scan</button>
-    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/40?token={guardRes['token']}`))" title="Scans 40 scrolls, about 1.2k videos">Fucking deep scan</button>
+    <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/fullScan/100?token={guardRes['token']}`))" title="Scans 100 scrolls, about 3k videos">Fucking deep scan</button>
     <button class="btn btn-outline" onclick="wrapToastReq(fetch(`/api/channel/{channel.id}/clearError?token={guardRes['token']}`))">Clear error</button></div>
 <textarea id="{pre}_err" class="textarea" style="height: 400px; width: 100%; margin-top: 12px; {'' if guardRes['darkmode'] else 'border: #ddd 1px solid;'}"></textarea><script>{pre}_err.value = {json.dumps(channel.fullscanErr)}</script>"""
 
@@ -140,8 +140,8 @@ def fragment_playlists(guardRes):
 <script>function {pre}_select(row, i, e) {{ dynamicLoad("#{pre}_res", `/fragment/playlist/${{row[0]}}?token={guardRes['token']}`); channel_sel.value = row[3]; channel_sel.oninput(); }}
 async function {pre}_new() {{ await wrapToastReq(fetchPost(`/api/playlist/new?token={guardRes['token']}`, {{ url: {pre}_url.value.trim() }})); {pre}_url.value = ""; {pre}_url.focus(); }}</script>"""
 
-@app.route("/api/playlist/new", guard=tokenGuard)
-def api_playlist_new(js):
+@app.route("/api/playlist/new", methods=["POST"], guard=tokenGuard)
+def api_playlist_new(js, guardRes):
     user = db["users"][guardRes["userId"]]; url = js["url"]
     if not url.startswith("https://www.youtube.com/playlist?list="): web.toast_error("Invalid playlist url format. Expected to start with 'https://www.youtube.com/playlist?list='")
     handle = url.split("https://www.youtube.com/playlist?list=")[1].split("&")[0]
@@ -225,10 +225,11 @@ def mfragment_vid(vidId, guardRes):
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/chatId?token={guardRes['token']}'))"  >Clear chatId  </button><div id="{pre}_3"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/title?token={guardRes['token']}'))"   >Clear title   </button><div id="{pre}_4"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/soundErr?token={guardRes['token']}'))">Clear soundErr</button><div id="{pre}_5"></div>
+        <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/duration?token={guardRes['token']}'))">Clear duration</button><div id="{pre}_6"></div>
         <button class="btn" onclick="wrapToastReq(fetch('/api/vid/{vid.id}/clear/retain?token={guardRes['token']}'))"  >Retain        </button><div>Retain video, dont delete to save space</div>
     </div></div>
 <script>{pre}_1.innerHTML = {json.dumps(vid.vidErr)}; {pre}_2.innerHTML = {json.dumps(vid.transErr)};
-{pre}_3.innerHTML = {json.dumps(access.chatId)}; {pre}_4.innerHTML = {json.dumps(vid.title)}; {pre}_5.innerHTML = {json.dumps(vid.soundErr)};</script>"""
+{pre}_3.innerHTML = {json.dumps(access.chatId)}; {pre}_4.innerHTML = {json.dumps(vid.title)}; {pre}_5.innerHTML = {json.dumps(vid.soundErr)}; {pre}_6.innerHTML = {json.dumps(vid.duration)};</script>"""
 
 @app.route("/api/vid/<int:vidId>/clear/<resource>", guard=vidGuard)
 def api_vid_clear(vidId, resource, guardRes):
@@ -243,14 +244,21 @@ def api_vid_clear(vidId, resource, guardRes):
         access.chatId = None
     if resource == "title":    vid.title = None
     if resource == "soundErr": vid.soundErr = None
+    if resource == "duration": vid.duration = None
     if resource == "retain":   vid.retain = True
     return "ok"
+
+transferSgn1 = """
+import time, threading
+def inner(): time.sleep(20); changeModel('smart')
+def func(): threading.Thread(target=inner, daemon=True).start()
+"""
 
 @toolCatchErr
 def ytTranscript(vidId:str, env) -> str:
     """Get transcript of specific youtube video"""
     yield {"type": "status", "content": "Fetching transcript"}
-    return {"resultType": "str", "result": api_vid_transcript(vidId, "vtt"), "func": "def func(): changeModel('smart')"}
+    return {"resultType": "str", "result": api_vid_transcript(vidId, "vtt"), "func": transferSgn1}
 
 toolsD = {"ytTranscript": ytTranscript}
 
